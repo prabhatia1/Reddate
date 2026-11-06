@@ -8,15 +8,17 @@
  * Addons serve SRT; browsers need WebVTT, so files are converted and attached
  * as a <track> from a blob: URL.
  *
- * Audio tracks: only Safari exposes HTMLMediaElement.audioTracks, and hls.js
- * handles HLS audio groups. Chrome/Firefox can't switch the audio of a plain
- * file, so the Audio button only appears where switching actually works.
+ * Audio tracks use native audioTracks, hls.js audio groups, or the server's
+ * embedded-file decoder through audio-fallback.js when the browser needs it.
+ * The Language button stays available even when a source has no selectable
+ * tracks, so viewers can see why and how to choose a different language.
  *
  * app.js calls tracks.attach(video) / attachHls(hls) / setContent(state) /
  * detach() as the player changes.
  */
 window.tracks = (function () {
     const PREF_KEY = 'reddate-sub-lang';   // remembered subtitle language ('off' or code)
+    const AUDIO_PREF_KEY = 'reddate-audio-lang';
     const OFFSET_STEP = 0.5;
 
     let video = null;
@@ -31,6 +33,14 @@ window.tracks = (function () {
     let blobUrl = null;
     let offset = 0;            // seconds added to every cue
     let browsingLang = null;   // language selected in the panel
+    let playerKind = null;     // 'direct' | 'yt' | null
+    let audioStatus = '';
+    let pendingAudio = null;
+    let audioSelected = false; // an explicit choice wins over later metadata updates
+    let removeListeners = [];
+    let panelOpener = null;
+    let fallback = null;
+    let audioSelectionId = 0;
 
     const $ = id => document.getElementById(id);
     const modal = () => $('trackModal');
@@ -195,10 +205,26 @@ window.tracks = (function () {
     }
 
     // ---------- audio tracks ----------
+    function audioLanguage(code) {
+        const tag = String(code || '').trim().toLowerCase().replace(/_/g, '-');
+        if (!tag || tag === 'und' || tag === 'zxx') return '';
+        const [base, ...region] = tag.split('-');
+        return [LANG_MAP[base] || base, ...region].join('-').toLowerCase();
+    }
+
+    function audioLabel(name, language, index) {
+        const label = String(name || '').trim();
+        const lang = language && langName(language);
+        if (!lang) return label || `Track ${index + 1}`;
+        if (/^(audio|track)[ _-]?\d+$/i.test(label)) return lang;
+        return label && label.toLowerCase() !== lang.toLowerCase() ? `${lang} · ${label}` : lang;
+    }
+
     function audioOptions() {
         if (hls && hls.audioTracks && hls.audioTracks.length) {
             return hls.audioTracks.map((t, i) => ({
-                label: t.name || (t.lang ? langName(t.lang) : `Track ${i + 1}`),
+                language: audioLanguage(t.lang),
+                label: audioLabel(t.name, audioLanguage(t.lang), i),
                 enabled: i === hls.audioTrack,
                 select: () => { hls.audioTrack = i; }
             }));
@@ -207,20 +233,104 @@ window.tracks = (function () {
         if (list && list.length) {
             const tracks = Array.from({ length: list.length }, (_, i) => list[i]);
             return tracks.map((t, i) => ({
-                label: t.label || (t.language ? langName(t.language) : `Track ${i + 1}`),
+                language: audioLanguage(t.language),
+                label: audioLabel(t.label, audioLanguage(t.language), i),
                 enabled: t.enabled,
-                select: () => tracks.forEach(o => { o.enabled = o === t; })
+                select: () => {
+                    // Enable the new track first so there is always an active one.
+                    t.enabled = true;
+                    tracks.forEach(o => { if (o !== t) o.enabled = false; });
+                }
+            }));
+        }
+        if (fallback && fallback.tracks.length) {
+            const labels = fallback.tracks.map((t, i) => audioLabel(t.name, audioLanguage(t.language), i));
+            return fallback.tracks.map((t, i) => ({
+                language: audioLanguage(t.language),
+                label: labels.filter(label => label === labels[i]).length > 1 ? `${labels[i]} · Track ${i + 1}` : labels[i],
+                codec: t.codec,
+                enabled: t.index === fallback.selected,
+                pending: t.index === fallback.pendingIndex,
+                select: () => fallback.select(t.index),
+                prepare: () => fallback.prepare(t.index)
             }));
         }
         return [];
+    }
+
+    async function selectAudio(index, remember = true) {
+        const opt = audioOptions()[index];
+        if (!opt) return;
+        const selectionId = ++audioSelectionId;
+        const owner = video;
+        try {
+            audioStatus = '';
+            if (!opt.enabled || fallback?.pending) {
+                pendingAudio = hls ? { index, label: opt.label } : null;
+                // Change only the audio track. Keep this player's source, position,
+                // play/pause state and the room's shared playback state untouched.
+                const result = opt.select();
+                if (result && typeof result.then === 'function') await result;
+            }
+            if (owner !== video || selectionId !== audioSelectionId) return;
+            if (remember) {
+                audioSelected = true;
+                try {
+                    if (opt.language) localStorage.setItem(AUDIO_PREF_KEY, opt.language);
+                    else localStorage.removeItem(AUDIO_PREF_KEY);
+                } catch (_) {}
+            }
+            if (!pendingAudio) audioStatus = `Selected ${opt.label}.`;
+        } catch (_) {
+            if (owner !== video || selectionId !== audioSelectionId) return;
+            pendingAudio = null;
+            audioStatus = 'Could not switch audio. Try another language or stream.';
+        }
+        renderPanel();
+    }
+
+    function refreshAudioOptions() {
+        // Track lists may arrive after loadedmetadata, or change with an HLS group.
+        if (!audioSelected && !pendingAudio && !(fallback && (fallback.pending || !fallback.canAutoSelect))) {
+            let pref = '';
+            try { pref = audioLanguage(localStorage.getItem(AUDIO_PREF_KEY)); } catch (_) {}
+            if (pref) {
+                const opts = audioOptions();
+                let index = opts.findIndex(o => o.language === pref);
+                if (index < 0) index = opts.findIndex(o => o.language && o.language.split('-')[0] === pref.split('-')[0]);
+                if (index >= 0 && !opts[index].enabled) selectAudio(index, false);
+            }
+        }
+        renderPanel();
+    }
+
+    function listen(target, event, handler) {
+        target.addEventListener(event, handler);
+        removeListeners.push(() => target.removeEventListener(event, handler));
+    }
+
+    function clearAudioListeners() {
+        audioSelectionId++;
+        if (fallback) { fallback.destroy(); fallback = null; }
+        removeListeners.forEach(remove => remove());
+        removeListeners = [];
+        pendingAudio = null;
+        audioStatus = '';
+        audioSelected = false;
     }
 
     // ---------- UI ----------
     function updateButtons() {
         $('subsBtn').style.display = video ? '' : 'none';
         $('subsBtn').classList.toggle('is-on', !!activeSubUrl);
-        // Only offer audio switching where the browser can actually do it.
-        $('audioBtn').style.display = video && audioOptions().length > 1 ? '' : 'none';
+        const selected = audioOptions().find(o => o.enabled);
+        ['audioBtn', 'theaterAudioBtn'].forEach(id => {
+            const btn = $(id);
+            if (!btn) return;
+            const label = selected ? `Audio language: ${selected.label}` : 'Audio language';
+            btn.title = label;
+            btn.setAttribute('aria-label', label);
+        });
     }
 
     function setPanelStatus(text) { const s = $('trackStatus'); if (s) s.textContent = text || ''; }
@@ -228,9 +338,23 @@ window.tracks = (function () {
     let panelMode = null; // 'subs' | 'audio'
 
     function openPanel(mode) {
+        if (!modal().classList.contains('show')) panelOpener = document.activeElement;
         panelMode = mode;
+        modal().classList.toggle('audio-mode', mode === 'audio');
         modal().classList.add('show');
         renderPanel();
+        modal().querySelector('.modal-close').focus({ preventScroll: true });
+        if (mode === 'audio' && fallback) fallback.load().then(() => {
+            refreshAudioOptions();
+            if (!modal().classList.contains('show') || panelMode !== 'audio') return;
+            const options = audioOptions();
+            const current = options.find(o => o.enabled);
+            let pref = '';
+            try { pref = audioLanguage(localStorage.getItem(AUDIO_PREF_KEY)); } catch (_) {}
+            const next = options.find(o => !o.enabled && o.language === pref) ||
+                options.find(o => !o.enabled && o.language && o.language !== current?.language);
+            if (next?.prepare) next.prepare();
+        });
         if (mode === 'subs' && !subs && content) {
             setPanelStatus('Finding subtitles…');
             ensureSubs().then(() => { setPanelStatus(''); renderPanel(); });
@@ -241,25 +365,85 @@ window.tracks = (function () {
         updateButtons();
         if (!modal().classList.contains('show')) return;
         const b = body();
+        const focusedAudio = document.activeElement && document.activeElement.dataset.audioIndex;
+        const focusedControl = ['audioMuteBtn', 'audioVolume'].includes(document.activeElement?.id) ? document.activeElement.id : null;
+        const scroll = b.querySelector('.audio-options')?.scrollTop || 0;
         const status = $('trackStatus') ? $('trackStatus').textContent : '';
         b.innerHTML = '';
         if (panelMode === 'audio') renderAudio(b); else renderSubs(b);
-        const st = el('div', 'browse-status');
+        const st = el('div', panelMode === 'audio' ? 'audio-status' : 'browse-status');
         st.id = 'trackStatus';
-        st.textContent = status;
-        b.appendChild(st);
+        st.setAttribute('role', 'status');
+        st.textContent = panelMode === 'audio' ? (pendingAudio ? `Switching to ${pendingAudio.label}…` : fallback?.status || audioStatus || 'Changes apply only to you.') : status;
+        (panelMode === 'audio' ? b.querySelector('.audio-footer') : b).appendChild(st);
+        const audioList = b.querySelector('.audio-options');
+        if (audioList) audioList.scrollTop = scroll;
+        if (focusedAudio !== undefined && panelMode === 'audio') {
+            const row = b.querySelector(`[data-audio-index="${focusedAudio}"]`);
+            (row || modal().querySelector('.modal-close')).focus({ preventScroll: true });
+        } else if (focusedControl && $(focusedControl)) {
+            $(focusedControl).focus({ preventScroll: true });
+        }
     }
 
     function renderAudio(b) {
-        b.appendChild(el('h2', null, 'Audio track'));
-        b.appendChild(el('div', 'addon-help', 'Only changes what you hear — everyone picks their own.'));
-        const list = el('div', 'stream-list');
-        audioOptions().forEach(opt => {
-            const row = el('button', `stream-row ${opt.enabled ? 'active' : ''}`, (opt.enabled ? '✔ ' : '') + opt.label);
-            row.onclick = () => { opt.select(); setTimeout(renderPanel, 100); };
+        const heading = el('div', 'audio-heading');
+        const title = el('h2', null, 'Audio language');
+        title.id = 'trackModalTitle';
+        const options = audioOptions();
+        heading.append(title, el('p', 'audio-description', 'Choose the language you hear.'));
+        if (options.length) heading.appendChild(el('div', 'audio-count', `${options.length} ${options.length === 1 ? 'track' : 'tracks'} available`));
+        b.appendChild(heading);
+        let explanation = '';
+        if (!playerKind) explanation = 'Load a video to see its audio languages.';
+        else if (playerKind === 'yt') explanation = 'For a YouTube video with alternate audio, open Settings (⚙) in the video, then Audio track. If that option is missing, the video does not offer another audio language.';
+        else if (video.error) explanation = 'This video could not be loaded. Choose another stream to see its audio languages.';
+        else if (!options.length && fallback) explanation = '';
+        else if (!options.length && video.readyState === 0) explanation = 'Audio languages will appear when the video finishes loading.';
+        else if (options.length === 1) explanation = 'This stream offers one selectable audio track. Choose another stream for a different language.';
+        else if (!options.length) explanation = 'No alternate audio is available to this player. Some browsers cannot switch audio inside MP4 or MKV files. Try a multi-language HLS stream or open this video in Safari.';
+        const list = el('div', 'audio-options');
+        list.setAttribute('role', 'group');
+        list.setAttribute('aria-label', 'Available audio languages');
+        if (explanation) list.appendChild(el('p', 'audio-explanation', explanation));
+        options.forEach((opt, index) => {
+            const switching = opt.pending || pendingAudio?.index === index;
+            const row = el('button', `audio-option${opt.enabled ? ' active' : ''}${switching ? ' is-pending' : ''}`);
+            row.type = 'button';
+            row.dataset.audioIndex = String(index);
+            row.setAttribute('aria-pressed', String(opt.enabled));
+            row.setAttribute('aria-label', opt.label);
+            if (switching) row.setAttribute('aria-busy', 'true');
+            const mark = el('span', 'audio-choice-mark', opt.enabled && !switching ? '✓' : '');
+            mark.setAttribute('aria-hidden', 'true');
+            const info = el('span', 'audio-option-info');
+            const name = opt.language ? langName(opt.language) : opt.label;
+            const detail = opt.label.startsWith(`${name} · `) ? opt.label.slice(name.length + 3) : opt.label === name ? '' : opt.label;
+            const details = [detail, opt.codec ? String(opt.codec).toUpperCase() : ''].filter(Boolean).join(' · ');
+            info.appendChild(el('span', 'audio-option-name', name));
+            if (details) info.appendChild(el('span', 'audio-option-detail', details));
+            row.append(mark, info);
+            row.onclick = () => selectAudio(index);
+            if (opt.prepare) { row.onpointerenter = opt.prepare; row.onfocus = opt.prepare; }
             list.appendChild(row);
         });
         b.appendChild(list);
+        const footer = el('div', 'audio-footer');
+        if (fallback && fallback.active) {
+            const volume = el('div', 'audio-volume');
+            const mute = el('button', 'btn', fallback.muted ? 'Unmute audio' : 'Mute audio');
+            mute.id = 'audioMuteBtn';
+            mute.setAttribute('aria-pressed', String(fallback.muted));
+            mute.onclick = () => fallback.toggleMute();
+            const slider = el('input');
+            slider.id = 'audioVolume';
+            slider.type = 'range'; slider.min = '0'; slider.max = '1'; slider.step = '0.05'; slider.value = video.volume;
+            slider.setAttribute('aria-label', 'Selected audio volume');
+            slider.oninput = () => fallback.setVolume(Number(slider.value));
+            volume.append(mute, slider);
+            footer.appendChild(volume);
+        }
+        b.appendChild(footer);
     }
 
     function icon(name) {
@@ -273,7 +457,9 @@ window.tracks = (function () {
     }
 
     function renderSubs(b) {
-        b.appendChild(el('h2', null, 'Subtitles'));
+        const title = el('h2', null, 'Subtitles');
+        title.id = 'trackModalTitle';
+        b.appendChild(title);
 
         // What's showing right now.
         const now = el('div', `sub-now ${activeSubUrl ? 'on' : ''}`);
@@ -351,6 +537,25 @@ window.tracks = (function () {
     function wire() {
         $('subsBtn').addEventListener('click', () => openPanel('subs'));
         $('audioBtn').addEventListener('click', () => openPanel('audio'));
+        $('theaterAudioBtn').addEventListener('click', () => openPanel('audio'));
+        const closePanel = () => {
+            modal().classList.remove('show');
+            if (panelOpener && panelOpener.isConnected) panelOpener.focus({ preventScroll: true });
+        };
+        modal().querySelector('.modal-close').addEventListener('click', closePanel);
+        modal().addEventListener('click', e => { if (e.target === modal()) closePanel(); });
+        document.addEventListener('keydown', e => {
+            if (!modal().classList.contains('show')) return;
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closePanel();
+            } else if (e.key === 'Tab') {
+                const focusable = [...modal().querySelectorAll('button, select, input, [tabindex="0"]')].filter(e => !e.disabled);
+                const first = focusable[0], last = focusable[focusable.length - 1];
+                if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+            }
+        });
         $('subFileInput').addEventListener('change', e => {
             loadSubtitleFile(e.target.files[0]);
             e.target.value = '';
@@ -360,8 +565,10 @@ window.tracks = (function () {
 
     return {
         // A new <video> was created for a direct stream.
-        attach(v) {
+        attach(v, src) {
+            clearAudioListeners();
             video = v;
+            playerKind = 'direct';
             hls = null;
             trackEl = null;
             blobUrl = null;
@@ -373,18 +580,47 @@ window.tracks = (function () {
             content = null;      // setContent() follows for every new player
             subs = null;
             subsPromise = null;
-            if (v.audioTracks && v.audioTracks.addEventListener) {
-                ['addtrack', 'removetrack', 'change'].forEach(ev => v.audioTracks.addEventListener(ev, renderPanel));
+            if (src && !v.audioTracks && !/\.m3u8($|\?)/i.test(src) && window.createAudioFallback) {
+                fallback = window.createAudioFallback(v, src, renderPanel);
             }
-            v.addEventListener('loadedmetadata', updateButtons);
-            updateButtons();
+            if (v.audioTracks && v.audioTracks.addEventListener) {
+                ['addtrack', 'removetrack'].forEach(ev => listen(v.audioTracks, ev, refreshAudioOptions));
+                listen(v.audioTracks, 'change', renderPanel);
+            }
+            listen(v, 'loadedmetadata', refreshAudioOptions);
+            if (fallback) listen(v, 'loadedmetadata', () => fallback?.load());
+            listen(v, 'error', renderPanel);
+            refreshAudioOptions();
         },
         attachHls(h) {
             hls = h;
             if (window.Hls) {
-                h.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, renderPanel);
-                h.on(window.Hls.Events.AUDIO_TRACK_SWITCHED, renderPanel);
+                const on = (event, handler) => {
+                    if (!event) return;
+                    h.on(event, handler);
+                    removeListeners.push(() => h.off(event, handler));
+                };
+                on(window.Hls.Events.AUDIO_TRACKS_UPDATED, refreshAudioOptions);
+                on(window.Hls.Events.AUDIO_TRACK_SWITCHED, () => {
+                    if (pendingAudio && pendingAudio.index === h.audioTrack) {
+                        audioStatus = `Selected ${pendingAudio.label}.`;
+                        pendingAudio = null;
+                    }
+                    renderPanel();
+                });
+                on(window.Hls.Events.ERROR, (_event, data) => {
+                    if (pendingAudio && data && (data.fatal || /audioTrack/i.test(data.details || '') || data.frag && data.frag.type === 'audio')) {
+                        pendingAudio = null;
+                        audioStatus = 'Could not load that audio track. Try another language or stream.';
+                        renderPanel();
+                    }
+                });
             }
+            refreshAudioOptions();
+        },
+        attachYouTube() {
+            this.detach();
+            playerKind = 'yt';
             updateButtons();
         },
         // What's playing (from the room's video state); null for pasted links.
@@ -398,9 +634,11 @@ window.tracks = (function () {
             autoApplyPreferred();
         },
         detach() {
+            clearAudioListeners();
             if (blobUrl) URL.revokeObjectURL(blobUrl);
             video = null;
             hls = null;
+            playerKind = null;
             trackEl = null;
             blobUrl = null;
             activeSubUrl = null;

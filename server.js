@@ -40,6 +40,7 @@ const io = new Server(server, {
 // real client for per-IP rate limits.
 app.set('trust proxy', 1);
 app.use(express.static('public'));
+require('./media-audio').registerMediaAudio(app);
 
 // ---- Anonymous usage stats (stats.js) ----
 // The page pings once per load (Render's health checks would inflate a
