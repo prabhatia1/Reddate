@@ -265,10 +265,7 @@
             get pendingIndex() { return pendingIndex; },
             get buffering() { return buffering; },
             get status() { return buffering ? 'Buffering selected audio…' : status; },
-            get muted() { return muted; },
             get canAutoSelect() { return sharedContext?.state === 'running'; },
-            setVolume(value) { video.volume = Math.max(0, Math.min(1, value)); syncVolume(); },
-            toggleMute() { muted = !muted; originalMuted = muted; syncVolume(); changed(); },
             destroy() {
                 disposed = true;
                 selectionId++;

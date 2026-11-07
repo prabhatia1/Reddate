@@ -366,7 +366,6 @@ window.tracks = (function () {
         if (!modal().classList.contains('show')) return;
         const b = body();
         const focusedAudio = document.activeElement && document.activeElement.dataset.audioIndex;
-        const focusedControl = ['audioMuteBtn', 'audioVolume'].includes(document.activeElement?.id) ? document.activeElement.id : null;
         const scroll = b.querySelector('.audio-options')?.scrollTop || 0;
         const status = $('trackStatus') ? $('trackStatus').textContent : '';
         b.innerHTML = '';
@@ -381,8 +380,6 @@ window.tracks = (function () {
         if (focusedAudio !== undefined && panelMode === 'audio') {
             const row = b.querySelector(`[data-audio-index="${focusedAudio}"]`);
             (row || modal().querySelector('.modal-close')).focus({ preventScroll: true });
-        } else if (focusedControl && $(focusedControl)) {
-            $(focusedControl).focus({ preventScroll: true });
         }
     }
 
@@ -428,22 +425,7 @@ window.tracks = (function () {
             list.appendChild(row);
         });
         b.appendChild(list);
-        const footer = el('div', 'audio-footer');
-        if (fallback && fallback.active) {
-            const volume = el('div', 'audio-volume');
-            const mute = el('button', 'btn', fallback.muted ? 'Unmute audio' : 'Mute audio');
-            mute.id = 'audioMuteBtn';
-            mute.setAttribute('aria-pressed', String(fallback.muted));
-            mute.onclick = () => fallback.toggleMute();
-            const slider = el('input');
-            slider.id = 'audioVolume';
-            slider.type = 'range'; slider.min = '0'; slider.max = '1'; slider.step = '0.05'; slider.value = video.volume;
-            slider.setAttribute('aria-label', 'Selected audio volume');
-            slider.oninput = () => fallback.setVolume(Number(slider.value));
-            volume.append(mute, slider);
-            footer.appendChild(volume);
-        }
-        b.appendChild(footer);
+        b.appendChild(el('div', 'audio-footer'));
     }
 
     function icon(name) {

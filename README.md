@@ -103,7 +103,8 @@ Both are **per viewer** — each person picks their own; nothing is synced.
   browser cannot switch, the server uses **FFmpeg + ffprobe** to identify the real
   tracks and decode short audio chunks. The original video keeps playing directly
   from its source; the selected audio follows pauses, seeks, buffering and playback
-  speed. Its volume/mute controls appear in the Language menu. For titles with
+  speed. Alternate audio uses the player's volume and mute setting from before
+  switching. For titles with
   many tracks, the list scrolls while the heading and controls stay
   visible. Recently decoded audio is reused when switching back, and the current
   audio continues until the new track is ready. The first uncached track still

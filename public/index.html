@@ -551,11 +551,8 @@
         .audio-explanation { font-size: 0.875rem; line-height: 1.6; color: var(--color-muted); margin: 0.25rem 0.5rem 0; }
         .audio-footer { flex: none; border-top: 1px solid var(--color-rule); padding: 0.875rem 1.5rem; }
         .audio-status { font-size: 0.8125rem; line-height: 1.5; color: var(--color-muted); overflow-wrap: anywhere; }
-        .audio-volume { display: flex; align-items: center; gap: var(--space-sm); margin-bottom: 0.75rem; }
-        .audio-volume .btn { flex: none; font-size: 0.8125rem; font-weight: 500; }
-        .audio-volume input { flex: 1; min-width: 0; min-height: 2.5rem; accent-color: var(--color-accent); }
         @media (hover: hover) { .audio-option:hover { background: var(--color-paper-2); border-color: var(--color-rule-2); } }
-        /* Extracted audio has its own volume controls in the language picker. */
+        /* Native controls cannot mute the separate extracted audio output. */
         video.external-audio::-webkit-media-controls-mute-button,
         video.external-audio::-webkit-media-controls-volume-slider { display: none; }
         @media (max-width: 47.999rem) {
