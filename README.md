@@ -94,10 +94,30 @@ Both are **per viewer** — each person picks their own; nothing is synced.
   first, early CAM/TS rips last), nudge timing ±0.5s if they drift, or load
   your own `.srt`/`.vtt` file for any video. Your language is remembered and
   applied automatically to the next title.
-- **🔊 Audio** — switch between a file's audio tracks (e.g. Hindi / English).
-  Browsers limit this: Safari supports it for regular files and every browser
-  supports it for HLS streams, but Chrome and Firefox can't switch the audio
-  of a regular MP4/MKV file. The button only appears when switching works.
+- **🔊 Language** — open the Language button below the video, or the audio
+  icon in full-screen mode, to switch audio while watching (e.g. Hindi / English).
+  Your choice applies only to you, keeps the playback position, and is remembered
+  for the next video when that language is available. The list updates as tracks
+  load. Switching requires audio tracks supplied by the source. Native and HLS
+  players switch tracks directly. For embedded tracks in MP4/MKV files that the
+  browser cannot switch, the server uses **FFmpeg + ffprobe** to identify the real
+  tracks and decode short audio chunks. The original video keeps playing directly
+  from its source; the selected audio follows pauses, seeks, buffering and playback
+  speed. Alternate audio uses the player's volume and mute setting from before
+  switching. For titles with
+  many tracks, the list scrolls while the heading and controls stay
+  visible. Recently decoded audio is reused when switching back, and the current
+  audio continues until the new track is ready. The first uncached track still
+  depends on the source host's response time. Seeking requests the target audio
+  immediately; if it is not cached, this viewer's picture waits with a buffering
+  indicator until sound is ready. Near an audio chunk boundary, the next chunk
+  also loads before resuming to avoid repeated short stops. Picture and sound
+  then resume together without broadcasting that local hold as a room pause.
+  Routine room corrections wait for the video decoder to settle after a seek.
+  The fallback supports different
+  titles, addons and audio codecs.
+  YouTube manages alternate audio through its own Settings → Audio track
+  menu, when the video offers it. This does not translate or dub single-language videos.
 - **🔊 Stream languages** — Chrome/Firefox always play a file's *default*
   audio track, so each stream shows what you'll hear first, e.g.
   "🔊 Hindi (+ Tamil, English)". The languages come from the file's own MKV
@@ -142,10 +162,17 @@ Reddate uses a shared-key end-to-end encryption scheme:
 | GIF images, direct video links, addon requests | ⚠️ Fetched from the external host, revealing your IP to it — not E2E |
 | Usage stats (if enabled) | Anonymous counts only — visits, unique visitors per day (salted hash, salt rotated daily, never stored), rooms, joins, messages, videos started by type, feature use. No IPs, room links, chat, names or titles. |
 | Stream files' audio languages | ⚠️ When the file host blocks the browser, the server reads the file's first 64 KB to list its languages, so it sees those candidate stream URLs |
+| Embedded audio switching fallback | ⚠️ The server reads portions of the selected media file and decodes the selected audio track. It sees the source URL and selected track. Short audio chunks and temporary source sessions are kept in memory, not written to disk. |
 
 ## Getting started
 
-Requires Node.js 14+.
+Requires Node.js 18+. For embedded-file audio switching, install `ffmpeg` and
+`ffprobe` on the server (available on PATH), or set `FFMPEG_PATH` and `FFPROBE_PATH`.
+Without them, native/HLS audio switching still works and the Language menu explains
+that embedded audio switching needs the server tools. Set `AUDIO_EXTRACTION=off`
+to disable the server fallback. It adds server CPU and media bandwidth usage;
+extraction is limited to four concurrent jobs, two per client IP, with bounded
+20-second chunks. Sources must have public HTTP(S) addresses.
 
 ```bash
 npm install
@@ -181,6 +208,9 @@ public/index.html  # Markup + styles (lobby + app shell)
 public/app.js      # Client logic: E2E crypto, chat, video sync (YouTube + direct links + HLS), polls
 public/addons.js   # Stremio-compatible addons: catalogs, search, episodes, stream picker
 public/tracks.js   # Per-viewer subtitles (addon + local files) and audio-track switching
+public/audio-fallback.js # Keeps extracted audio aligned with the original video
+public/playback-gate.js # Coordinates local audio buffering without pausing the room
+media-audio.js     # Optional FFmpeg audio extraction, in-memory sessions and bounded chunks
 public/mkv.js      # MKV header reader (audio track languages), shared by browser and server
 public/badges.js   # Stream badges (resolution, service, HDR, source, audio, codec, edition)
 public/voice.js    # Discord-style voice room, up to 8 (WebRTC mesh, E2E via DTLS-SRTP)

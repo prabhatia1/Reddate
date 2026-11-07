@@ -517,6 +517,7 @@ function applyPending() {
 function createYouTubePlayer(videoId) {
     if (!window.YT || !YT.Player) { setTimeout(() => createYouTubePlayer(videoId), 300); return; }
     destroyPlayer();
+    if (window.tracks) window.tracks.attachYouTube();
     currentSrc = videoId;
     const mount = document.createElement('div');
     stageEl().appendChild(mount);
@@ -564,16 +565,24 @@ function createDirectPlayer(src) {
     destroyPlayer();
     currentSrc = src;
     const v = document.createElement('video');
+    v.preload = 'auto';
     let hls = null;
-    if (isHlsUrl(src) && !v.canPlayType('application/vnd.apple.mpegurl')) {
-        // Chrome/Firefox need hls.js; Safari plays HLS natively via v.src.
+    if (isHlsUrl(src) && !(v.canPlayType('application/vnd.apple.mpegurl') && v.audioTracks)) {
+        // Some browsers play HLS natively without exposing audio tracks. Use
+        // hls.js there so language switching works; Safari keeps native tracks.
         loadHlsJs().then(Hls => {
-            if (currentSrc !== src || !Hls || !Hls.isSupported()) return;
+            if (!v.isConnected) return;
+            if (!Hls || !Hls.isSupported()) { v.src = src; return; }
             hls = new Hls();
+            // Listen before loading: the language list can arrive immediately.
+            if (window.tracks) window.tracks.attachHls(hls);
             hls.loadSource(src);
             hls.attachMedia(v);
-            if (window.tracks) window.tracks.attachHls(hls);
-        }).catch(() => showToast('Could not load the HLS player'));
+        }).catch(() => {
+            if (!v.isConnected) return;
+            v.src = src;
+            showToast('Audio controls could not load. Trying the browser player.');
+        });
     } else {
         v.src = src;
     }
@@ -581,19 +590,28 @@ function createDirectPlayer(src) {
     v.playsInline = true;
     v.style.background = '#000'; // sized by #videoPlayer (fixed height on desktop, 16:9 on phones)
     stageEl().appendChild(v);
-    if (window.tracks) window.tracks.attach(v);
+    const audioGate = window.createPlaybackGate(v, {
+        onPlayback: playing => { if (!consumeIgnore()) onLocalPlayPause(playing); },
+        onBuffering: buffering => {
+            document.getElementById('audioBufferingStatus').hidden = !buffering;
+        },
+        onPlayError: () => { ignoreNextStateChange = false; showToast('Tap Play to resume playback'); }
+    });
+    if (window.tracks) window.tracks.attach(v, src);
     // Addon sources can take a minute to resolve; say so instead of showing a dead black box.
     setPlayerStatus('⏳ Loading stream…');
     const slowTimer = setTimeout(() => {
         if (!isPlayerReady && currentSrc === src) setPlayerStatus('⏳ Still loading — this source is slow. If it doesn\'t start soon, pick another stream in 🍿 Browse.');
     }, 15000);
     v.addEventListener('loadeddata', () => { clearTimeout(slowTimer); setPlayerStatus(''); isPlayerReady = true; updatePlayPauseButton(); applyPending(); });
-    v.addEventListener('play', () => { if (!consumeIgnore()) onLocalPlayPause(true); });
-    v.addEventListener('pause', () => { if (!consumeIgnore()) onLocalPlayPause(false); });
     // Only broadcast seeks the viewer made. Seeks applied from the room (remote
     // seek, sync, drift correction) must not be re-broadcast, or two players
     // echo the same seek back and forth forever and playback never advances.
-    let programmaticSeekTo = null;
+    let programmaticSeekTo = null, syncAfter = 0;
+    // Let the decoder settle after startup or a seek before applying routine
+    // room drift corrections. Explicit room seeks still take effect at once.
+    v.addEventListener('seeking', () => { syncAfter = performance.now() + 2000; });
+    v.addEventListener('playing', () => { syncAfter = performance.now() + 2000; });
     v.addEventListener('seeked', () => {
         if (programmaticSeekTo !== null && Math.abs(v.currentTime - programmaticSeekTo) < 0.5) {
             programmaticSeekTo = null;
@@ -609,10 +627,16 @@ function createDirectPlayer(src) {
     });
     vp = {
         getCurrentTime: () => v.currentTime || 0,
-        seekTo: (t) => { programmaticSeekTo = t; v.currentTime = t; },
-        play: () => { const p = v.play(); if (p && p.catch) p.catch(() => showToast('Tap the video once to start playback ▶️')); },
-        pause: () => v.pause(),
-        destroy: () => { clearTimeout(slowTimer); if (hls) hls.destroy(); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); }
+        seekTo: (t) => {
+            if (!Number.isFinite(t) || Math.abs(v.currentTime - t) < 0.1) return;
+            programmaticSeekTo = t;
+            v.currentTime = t;
+        },
+        play: () => { if (!audioGate.play()) ignoreNextStateChange = false; },
+        pause: () => { if (!audioGate.pause()) ignoreNextStateChange = false; },
+        isBuffering: () => audioGate.buffering || v.seeking || v.readyState < 3,
+        canSyncProgress: () => !v.paused && !audioGate.buffering && !v.seeking && v.readyState >= 3 && performance.now() >= syncAfter,
+        destroy: () => { audioGate.destroy(); clearTimeout(slowTimer); if (hls) hls.destroy(); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); }
     };
 }
 
@@ -643,7 +667,8 @@ function wireVideoEvents() {
         data.isPlaying ? vp.play() : vp.pause();
     });
     socket.on('video-progress-sync', data => {
-        if (!vp || !isPlayerReady) return;
+        if (!vp || !isPlayerReady || vp.isBuffering?.()) return;
+        if (vp.canSyncProgress && !vp.canSyncProgress()) return;
         if (Math.abs(vp.getCurrentTime() - data.currentTime) > 2) vp.seekTo(data.currentTime);
     });
     socket.on('video-seek', data => {
@@ -664,7 +689,7 @@ function wireVideoEvents() {
 
     // Periodically share our position so late joiners / drifters stay in sync.
     setInterval(() => {
-        if (vp && isPlayerReady && isVideoPlaying) {
+        if (vp && isPlayerReady && isVideoPlaying && !vp.isBuffering?.()) {
             socket.emit('video-progress', { currentTime: vp.getCurrentTime() });
         }
     }, 4000);
@@ -832,7 +857,8 @@ function wireChatPanel() {
     document.getElementById('chatToggle').addEventListener('click', () => setChatOpen(!isChatVisible()));
     document.getElementById('chatClose').addEventListener('click', () => setChatOpen(false));
     document.addEventListener('keydown', e => {
-        if (e.key !== 'Escape') return;
+        if (e.key !== 'Escape' || e.defaultPrevented) return;
+        if (document.querySelector('.modal.show')) return;
         if (theater && theaterChat) setChatOpen(false);
         else if (theater) setTheater(false); // the CSS-only full screen (iPhone) has no system Esc
         else if (sheetOpen && !wideLayout.matches) setChatOpen(false);
