@@ -749,6 +749,24 @@ function stageEl() { return document.getElementById('videoPlayer'); }
 let nextCover = null;
 let currentContent = null; // { type, id, filename } of an addon title, for subtitles
 let lastLoaded = null;      // the room's video as last announced, to rebuild the room if the server restarts
+let roomSubtitle = null;
+let subtitleRevision = 0;
+
+function setSubtitleMedia(data) {
+    if (data.mediaId !== lastLoaded?.mediaId) {
+        roomSubtitle = null;
+        subtitleRevision = 0;
+        window.tracks?.setMedia(data.mediaId);
+    }
+}
+
+function shareRoomSubtitle({ mediaId, state }) {
+    if (!roomLive || !inRoom) return; // private playback has no other viewers yet
+    if (!socket?.connected || mediaId !== lastLoaded?.mediaId) { showToast('Reconnect to the room before changing subtitles.'); return; }
+    socket.timeout(10000).emit('set-subtitles', { mediaId, state }, (error, result) => {
+        if (error || !result?.ok) showToast(result?.message || 'The subtitle could not be shared. Try again.');
+    });
+}
 
 // Rejoin our room. After a server restart the room is gone; whoever comes back first brings it back as it was
 // (what's on, where it was, who hosts), so nobody has to start again.
@@ -1333,7 +1351,7 @@ function createNativePlayer(src, opts) {
             live: !!roomLive, // a real room on the server (a party); watching alone is private until then
             invite: roomId ? `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(roomCode || roomId)}` : '',
             people: roomUsers.map(u => ({ id: u.id, name: u.name, you: (u.ids || [u.id]).includes(socket.id), buffering: !!u.buffering, host: !!(party && (u.ids || [u.id]).some(i => party.host === i || (Array.isArray(party.hosts) && party.hosts.includes(i)))), main: !!(party && (u.ids || [u.id]).includes(party.host)) })).sort((a, b) => b.you - a.you),
-            subs, subsLoading,
+            subs, subsLoading, roomSubtitle,
             subPref: window.tracks ? window.tracks.getPref() : '',
             episodes, current: currentContent ? currentContent.id : '', show: currentContent ? (currentContent.show || '') : '', showName, autoNext: autoNextOn(),
             hostOnly: !!party, isHost: isHost(), isMain: !!(party && socket && party.host === socket.id), hostName: party ? party.hostName : '', guestsCanPause: !!(party && party.guestsCanPause),
@@ -1494,6 +1512,12 @@ function createNativePlayer(src, opts) {
             case 'subpref':
                 if (window.tracks && typeof ev.lang === 'string') window.tracks.setPref(ev.lang);
                 break;
+            case 'subtitle':
+                if (ev.state && typeof ev.state === 'object') {
+                    window.tracks?.applyShared(ev.state, true);
+                    shareRoomSubtitle({ mediaId: lastLoaded?.mediaId, state: ev.state });
+                }
+                break;
             case 'chat':
                 if (window.reddateChat && typeof ev.text === 'string') window.reddateChat.send(ev.text);
                 break;
@@ -1536,7 +1560,7 @@ function createNativePlayer(src, opts) {
         pause: () => { if (!closed) N.command('{"cmd":"pause"}'); },
         destroy: () => { if (tracking) track('stop'); try { N.command('{"cmd":"stop"}'); } catch (_) {} if (window.ReddateTV) window.ReddateTV.onNative = null; window.reddateNativeInfo = null; window.__nativeOpen = false; }
     };
-    open(0, false);
+    open(Math.max(0, roomPos()), anchor.isPlaying);
 }
 
 function createDirectPlayer(src) {
@@ -1623,6 +1647,14 @@ function ensurePlayer(state) {
 
 
 function wireVideoEvents() {
+    window.tracks?.configureRoom(shareRoomSubtitle);
+    socket.on('subtitles-updated', payload => {
+        if (payload.mediaId !== lastLoaded?.mediaId || payload.revision <= subtitleRevision) return;
+        subtitleRevision = payload.revision;
+        roomSubtitle = { ...payload, own: payload.sender === socket.id };
+        window.tracks?.applyShared(payload.state, roomSubtitle.own);
+        if (window.reddateNativeInfo) window.reddateNativeInfo();
+    });
     socket.on('video-loaded', data => {
         if (party && !isHost() && detached) {
             // The host started something else while this guest was off on their own: ask first.
@@ -1637,6 +1669,7 @@ function wireVideoEvents() {
     });
     handleLoadedRef = data => handleLoaded(data);
     function handleLoaded(data) {
+        setSubtitleMedia(data);
         lastLoaded = data;
         seekFails = 0; seekAim = 0; pendingSeekAt = 0; // a new video: learn afresh whether it can seek
         nextCover = { art: data.content && data.content.art, title: data.title };
@@ -1661,6 +1694,7 @@ function wireVideoEvents() {
         applyAnchor();
     });
     socket.on('video-sync', state => {
+        setSubtitleMedia(state);
         lastLoaded = state;
         nextCover = { art: state.content && state.content.art, title: state.title };
         currentContent = state.kind === 'direct' ? state.content : null;

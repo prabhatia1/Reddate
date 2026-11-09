@@ -58,6 +58,10 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     const [subUrl, setSubUrl] = useState('');
     const [look, setLook] = useState<SubLook>(loadLook);
     const [subDelay, setSubDelay] = useState(0);
+    const subSelection = useRef(0);
+    const sharedSubRevision = useRef('');
+    const selectedSub = useRef<Json>({ vtt: null, key: '', lang: 'off', label: '', offset: 0 });
+    useEffect(() => () => { subSelection.current++; }, [open.sid]);
     const [cueText, setCueText] = useState('');
     const [audioTracks, setAudioTracks] = useState<{ id: number; label: string; lang: string; on: boolean }[]>([]);
     const audioFallback = useRef<any>(null);
@@ -443,7 +447,12 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
 
     // ---- subtitles ----
     async function useSub(s: Json | null) {
-        if (!s) { setCues([]); setSubLabel(''); setSubUrl(''); send({ type: 'subpref', lang: 'off' }); return; }
+        const selection = ++subSelection.current;
+        if (!s) {
+            selectedSub.current = { vtt: null, key: '', lang: 'off', label: '', offset: 0 };
+            setCues([]); setSubLabel(''); setSubUrl(''); setSubDelay(0);
+            send({ type: 'subpref', lang: 'off' }); send({ type: 'subtitle', state: selectedSub.current }); return;
+        }
         try {
             const r = await fetch(s.url);
             if (!r.ok) throw new Error('bad');
@@ -451,22 +460,65 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
             if (buf.byteLength > MAX_SUB_BYTES) throw new Error('big');
             let text = new TextDecoder('utf-8').decode(buf);
             if (text.includes('�')) text = new TextDecoder('windows-1252').decode(buf);
+            if (selection !== subSelection.current) return;
             const c = parseSubs(text);
             if (!c.length) throw new Error('empty');
             setCues(c); setSubLabel(`${s.label || s.lang}${s.name ? ' · ' + s.name : ''}`); setSubUrl(String(s.url || ''));
+            setSubDelay(0);
+            selectedSub.current = { vtt: text, key: String(s.url || ''), lang: String(s.lang || 'und'), label: `${s.label || s.lang}${s.name ? ' · ' + s.name : ''}`, offset: 0 };
             send({ type: 'subpref', lang: String(s.lang || '') });
-        } catch { toast('That subtitle couldn’t be loaded here. Try another.'); }
+            send({ type: 'subtitle', state: selectedSub.current });
+        } catch { if (selection === subSelection.current) toast('That subtitle couldn’t be loaded here. Try another.'); }
     }
+    function changeSubDelay(delay: number) {
+        setSubDelay(delay);
+        selectedSub.current = { ...selectedSub.current, offset: delay };
+        send({ type: 'subtitle', state: selectedSub.current });
+    }
+    useEffect(() => {
+        const shared = info.roomSubtitle;
+        if (!shared?.state) return;
+        const revision = `${shared.mediaId}:${shared.revision}`;
+        if (revision === sharedSubRevision.current) return;
+        sharedSubRevision.current = revision;
+        if (!shared.own) subSelection.current++;
+        const s = shared.state;
+        selectedSub.current = s;
+        const v = vref.current;
+        const h = hls.current;
+        const syncEmbedded = () => {
+            const lang = s.embeddedLang ? audioLanguage(s.embeddedLang) : '';
+            if (h) h.subtitleTrack = lang ? h.subtitleTracks.findIndex(t => audioLanguage(t.lang || '') === lang) : -1;
+            for (const t of Array.from(v?.textTracks || []) as TextTrack[]) {
+                if (t.kind !== 'subtitles' && t.kind !== 'captions') continue;
+                t.mode = lang && audioLanguage(t.language) === lang ? 'showing' : 'disabled';
+                if (t.mode === 'showing') for (const cue of Array.from(t.cues || []) as any[]) {
+                    if (!cue._base) cue._base = [cue.startTime, cue.endTime];
+                    cue.startTime = Math.max(0, cue._base[0] + (Number(s.offset) || 0));
+                    cue.endTime = Math.max(0, cue._base[1] + (Number(s.offset) || 0));
+                }
+            }
+        };
+        syncEmbedded();
+        v?.textTracks?.addEventListener('addtrack', syncEmbedded);
+        h?.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, syncEmbedded);
+        setCues(s.vtt ? parseSubs(s.vtt) : []); setSubUrl(s.vtt ? String(s.key || '') : s.embeddedLang ? `embedded:${s.embeddedLang}` : '');
+        setSubLabel(s.vtt || s.embeddedLang ? String(s.label || s.lang || 'Room subtitle') : ''); setSubDelay(Number(s.offset) || 0);
+        return () => {
+            v?.textTracks?.removeEventListener('addtrack', syncEmbedded);
+            h?.off(Hls.Events.SUBTITLE_TRACKS_UPDATED, syncEmbedded);
+        }
+    }, [info.roomSubtitle?.mediaId, info.roomSubtitle?.revision]);
     // Pick the remembered language when the list arrives.
     const subsPicked = useRef(false);
     useEffect(() => {
-        if (subsPicked.current) return;
+        if (subsPicked.current || info.live || info.roomSubtitle) return;
         const subs: Json[] = info.subs || [];
         const pref: string = info.subPref || open.subPref || '';
         if (!subs.length || !pref || pref === 'off') return;
         const m = subs.find(s => String(s.lang).toLowerCase().startsWith(pref.toLowerCase().slice(0, 2)));
         if (m) { subsPicked.current = true; useSub(m); }
-    }, [info.subs, info.subPref]);
+    }, [info.subs, info.subPref, info.live, info.roomSubtitle]);
 
     // ---- chat ----
     function sendChat(text: string) {
@@ -645,7 +697,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
                     )}
                     {panel === 'subs' && (
                         <SubsPanel subs={info.subs || []} loading={!!info.subsLoading} current={subUrl} delay={subDelay}
-                            onPick={useSub} onDelay={setSubDelay} look={look} onLook={patch => setLook(l => { const n = { ...l, ...patch }; saveLook(n); return n; })} />
+                            onPick={useSub} onDelay={changeSubDelay} look={look} onLook={patch => setLook(l => { const n = { ...l, ...patch }; saveLook(n); return n; })} />
                     )}
                     {panel === 'audio' && (
                         <div className="body">

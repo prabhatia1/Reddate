@@ -54,7 +54,7 @@ const io = new Server(server, {
     // A TV busy starting a video can go quiet for a while; dropping its host for that ends the party. 20 s + 40 s.
     pingInterval: 20000, pingTimeout: 40000,
     // A chat picture is sent as one message: the default 1 MB limit closed the sender's connection (they were thrown out of the room).
-    maxHttpBufferSize: 4 * 1024 * 1024,
+    maxHttpBufferSize: 8 * 1024 * 1024,
     cors: { origin: (origin, cb) => cb(null, originAllowed(origin, null) ? origin || true : false), methods: ['GET', 'POST'] },
     allowRequest: (req, cb) => cb(null, originAllowed(req.headers.origin, req.headers.host))
 });
@@ -440,6 +440,7 @@ const MAX_TEXT = 2000;       // one chat message
 const MAX_IMAGE = 3 * 1024 * 1024; // chat image as a data URL (client caps uploads at 2 MB)
 const MAX_STREAM_URL = 4096;
 const MAX_TITLE = 200;
+const MAX_SUBTITLE_BYTES = 5 * 1024 * 1024;
 
 // The room's video state as of right now (a playing video has moved on since its last update).
 function stateNow(room) {
@@ -461,6 +462,8 @@ function getRoom(roomId) {
             // memory only while the room exists. Addon URLs can carry private
             // tokens, so it is never logged or stored.
             addons: null,
+            subtitles: null,
+            subtitleRevision: 0,
             watchEpoch: 0,
             // Voice room: socket id -> { username, muted, cam }. Audio/video go
             // peer-to-peer (WebRTC mesh); the server only relays signaling.
@@ -583,7 +586,7 @@ function forgetDevice(socket) {
 
 // ---- Watch parties: rooms started by inviting your own profiles/devices ----
 // The person who invites is the host and the only one who controls playback (play, pause, seek,
-// what's on). Everyone picks their own subtitles and audio. No limit on size. If the host
+// what's on). Subtitle changes are shared; audio stays personal. No limit on size. If the host
 // drops out, they get HOST_GRACE_MS to come back before control passes to whoever joined first.
 // (No limit on how many people can be in a party.)
 const HOST_GRACE_MS = 60000;
@@ -621,7 +624,7 @@ function maybeRestoreHost(socket) {
 function startParty(socket, room) {
     if (room.party) return;
     room.party = { guestsCanPause: false, hostKeys: new Set([hostKeyOf(socket)]), host: socket.id, hostName: socket.data.profile || socket.data.username || 'Host', uid: socket.data.uid, device: socket.data.device, away: false, timer: null };
-    if (!room.restoredAt || Date.now() - room.restoredAt > 120000) io.to(socket.data.roomId).emit('system-message', { message: `👑 ${room.party.hostName} is hosting. Only they control playback; everyone picks their own subtitles.`, timestamp: Date.now() });
+    if (!room.restoredAt || Date.now() - room.restoredAt > 120000) io.to(socket.data.roomId).emit('system-message', { message: `👑 ${room.party.hostName} is hosting. Only they control playback; subtitle changes are shared with everyone.`, timestamp: Date.now() });
     broadcastParty(socket.data.roomId);
 }
 
@@ -848,7 +851,7 @@ io.on('connection', (socket) => {
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
         const room = getRoom(roomId);
-        if (rebuilt) { room.videoState = rebuilt; room.restoredAt = Date.now(); }
+        if (rebuilt) { room.videoState = { ...rebuilt, mediaId: crypto.randomBytes(12).toString('hex') }; room.restoredAt = Date.now(); }
         if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
         socket.data.roomId = roomId;
         socket.data.username = username;
@@ -878,6 +881,7 @@ io.on('connection', (socket) => {
 
         // Bring the newcomer up to speed with the current video state.
         if (room.videoState.videoId || room.videoState.src) socket.emit('video-sync', stateNow(room));
+        if (room.subtitles) socket.emit('subtitles-updated', room.subtitles);
         if (room.addons) socket.emit('addons-updated', { addons: room.addons, user: null });
         if (room.voice.size) socket.emit('voice-members', [...room.voice].map(([id, m]) => ({ id, ...m })));
         broadcastUserCount(roomId);
@@ -984,6 +988,7 @@ io.on('connection', (socket) => {
         const title = typeof videoData.title === 'string' ? videoData.title.slice(0, MAX_TITLE) : '';
         const room = getRoom(roomId);
         room.videoState = {
+            mediaId: crypto.randomBytes(12).toString('hex'),
             videoId: kind === 'yt' ? String(videoData.videoId || '') : '',
             src: kind === 'direct' ? src : '',
             kind,
@@ -993,10 +998,24 @@ io.on('connection', (socket) => {
             currentTime: 0,
             lastUpdate: Date.now()
         };
+        room.subtitles = null;
+        room.subtitleRevision = 0;
         // Which kind of video was started (counts only — never the title or link).
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
         room.watchEpoch++;
         io.to(roomId).emit('video-loaded', { ...room.videoState, serverTime: room.videoState.lastUpdate, user: socket.data.username });
+    });
+
+    socket.on('set-subtitles', (payload = {}, ack) => {
+        const reply = data => { if (typeof ack === 'function') ack(data); };
+        const room = rooms.get(socket.data.roomId);
+        if (!room || !room.videoState.mediaId || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false, message: 'The video changed. Pick the subtitle again.' });
+        const s = payload.state;
+        if (!s || (s.vtt !== null && typeof s.vtt !== 'string') || (s.vtt && Buffer.byteLength(s.vtt) > MAX_SUBTITLE_BYTES)) return reply({ ok: false, message: 'Subtitle file too large (max 5 MB).' });
+        const state = { vtt: s.vtt, key: String(s.key || '').slice(0, MAX_STREAM_URL), embeddedLang: String(s.embeddedLang || '').slice(0, 40), lang: String(s.lang || 'off').slice(0, 40), label: String(s.label || '').slice(0, MAX_TITLE), offset: Number.isFinite(s.offset) ? Math.max(-600, Math.min(600, s.offset)) : 0 };
+        room.subtitles = { mediaId: payload.mediaId, state, revision: ++room.subtitleRevision, sender: socket.id };
+        io.to(socket.data.roomId).emit('subtitles-updated', room.subtitles);
+        reply({ ok: true });
     });
 
     // ---- Room addons (shared list of manifest URLs; memory only, never logged) ----
