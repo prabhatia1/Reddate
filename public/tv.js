@@ -344,7 +344,7 @@
     // "Invite phones": a QR code and link so phones can join this TV's room.
     async function showInvite() {
         if (window.reddateRoom.goLive) window.reddateRoom.goLive(); // watching alone is a private room: inviting makes it a real one, with a code
-        const link = `${location.origin}/#room=${encodeURIComponent(roomId)}`;
+        const link = `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(window.reddateRoom.roomCode() || roomId)}`;
         showScreen(c => {
             root.dataset.kind = 'invite';
             const left = el('div', 'tv-pair-text');
@@ -552,7 +552,7 @@
             return {
                 entered: appEntered, accounts: A.isEnabled(), signedIn: A.isSignedIn(),
                 profile: A.profileName(), profileId: A.activeProfileId(), profiles: A.profiles(),
-                inRoom, roomCode: R.roomCode(), invite: inRoom ? `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(R.roomId())}` : '',
+                inRoom, roomCode: R.roomCode(), invite: inRoom ? `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(R.roomCode() || R.roomId())}` : '',
                 nowPlaying: inRoom ? document.getElementById('nowPlaying').textContent : '',
                 people: typeof roomUsers !== 'undefined' ? roomUsers.map(u => u.name) : [],
                 isGuest: inRoom && R.isGuest(), hostName: inRoom ? R.hostName() : ''
@@ -604,10 +604,14 @@
         },
         leaveRoom() { window.reddateRoom.leave(); return true; },
         joinCode: ({ code }) => window.reddateJoinByCode(String(code || '')),
-        together() {
+        async together({ code = '' } = {}) {
             const R = window.reddateRoom;
-            if (!R.isInRoom()) R.enterRoom(R.savedName() || 'TV', null);
-            return true;
+            if (code && !/^[A-Z0-9]{5}$/i.test(code)) return { ok: false, message: 'Use exactly 5 letters or numbers.' };
+            if (R.isInRoom() && R.isLive()) return { ok: true };
+            const joined = waitForJoin();
+            R.enterRoom(R.savedName() || 'TV', null, null, { code: code.toUpperCase() });
+            R.goLive();
+            return joined;
         },
         chooseProfile({ id }) { window.reddateAccount.chooseProfile(id); return true; },
         async addProfile({ name }) { const id = await window.reddateAccount.addProfile(name); return { ok: !!id, id: id || '' }; },

@@ -84,7 +84,7 @@ app.use((req, res, next) => {
 // The browser app (reddate.tv): the same server answers it, by host name. TVs keep using tv.reddate.xyz.
 // WEB_HOSTS is a comma-separated list; *.localhost hosts starting with "web." work for local development
 // (web.localhost:3090). The app is built into web/dist (npm run build in /web).
-const WEB_HOSTS = (process.env.WEB_HOSTS || 'reddate.tv,www.reddate.tv').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+const WEB_HOSTS = (process.env.WEB_HOSTS || 'reddate.xyz,www.reddate.xyz,reddate.tv,www.reddate.tv').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
 const isWebHost = req => {
     const h = String(req.hostname || '').toLowerCase();
     return WEB_HOSTS.includes(h) || /^web\.localhost$/.test(h);
@@ -124,6 +124,7 @@ app.use((req, res, next) => {
 // Render (and most hosts) put one proxy in front; trust it so req.ip is the
 // real client for per-IP rate limits.
 app.set('trust proxy', 1);
+require('./media-audio').registerMediaAudio(app);
 // The guest page for joining a watch party by code: the same app, trimmed down (see the `lean` class).
 const appPage = path.join(__dirname, 'public', 'index.html');
 const sitePage = name => path.join(__dirname, 'tv-site', name);
@@ -428,6 +429,8 @@ app.post('/media-info', express.json({ limit: '8kb' }), async (req, res) => {
 
 // roomId -> { videoState, users: Map<socketId, {username}>, poll, pollVotes: Map, addons }
 const rooms = new Map();
+const { createRoomCodes, registerRoomCodes } = require('./room-codes');
+const roomCodes = createRoomCodes(rooms);
 
 const MAX_ROOM_ID = 128;
 const MAX_USERNAME = 40;
@@ -464,6 +467,7 @@ function getRoom(roomId) {
             voice: new Map()
         };
         rooms.set(roomId, room);
+        roomCodes.assign(roomId);
     }
     return room;
 }
@@ -780,7 +784,8 @@ io.on('connection', (socket) => {
     });
 
     stats.observeOnline(io.engine.clientsCount);
-    socket.on('join-room', async ({ roomId, username, restore } = {}) => {
+    registerRoomCodes(socket, roomCodes, rooms);
+    socket.on('join-room', async ({ roomId, username, restore, roomCode, requireExisting } = {}) => {
         if (typeof roomId !== 'string' || !roomId || roomId.length > MAX_ROOM_ID) return;
         username = (typeof username === 'string' ? username : '').slice(0, MAX_USERNAME).trim() || 'Guest';
         // Room joins a minute from one address (a reconnect loop or a script making rooms), well above any real use.
@@ -790,6 +795,11 @@ io.on('connection', (socket) => {
         }
 
         if (socket.data.helloP) await socket.data.helloP;
+        if (requireExisting && !rooms.has(roomId)) { socket.emit('join-denied', { reason: 'none' }); return; }
+        if (roomCode && !rooms.has(roomId)) {
+            const code = typeof roomCode === 'string' ? roomCode.trim().toUpperCase() : '';
+            if (!/^[A-Z0-9]{5}$/.test(code) || roomCodes.find(code)) { socket.emit('join-denied', { reason: 'code', message: 'That code is invalid or already in use. Choose 5 letters or numbers.' }); return; }
+        }
         // A party (or any room a signed-in person is in) takes only signed-in people with a profile name.
         const present = rooms.get(roomId);
         const gated = present && present.users.size && (present.party || [...present.users.keys()].some(id => {
@@ -821,7 +831,7 @@ io.on('connection', (socket) => {
             socket.data.roomId = roomId;
             socket.data.username = username;
             socket.join(roomId);
-            socket.emit('joined', { roomId });
+            socket.emit('joined', { roomId, code: roomCodes.assign(roomId) });
             socket.emit('user-count', peopleOf(existingRoom).length);
             socket.emit('room-users', peopleOf(existingRoom));
             if (existingRoom.voice.size) socket.emit('voice-members', [...existingRoom.voice].map(([id, m]) => ({ id, ...m })));
@@ -842,6 +852,7 @@ io.on('connection', (socket) => {
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
         const room = getRoom(roomId);
+        if (roomCode && !existingRoom) room.code = roomCode.trim().toUpperCase();
         if (rebuilt) { room.videoState = rebuilt; room.restoredAt = Date.now(); }
         if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
         socket.data.roomId = roomId;
@@ -875,7 +886,7 @@ io.on('connection', (socket) => {
         if (room.addons) socket.emit('addons-updated', { addons: room.addons, user: null });
         if (room.voice.size) socket.emit('voice-members', [...room.voice].map(([id, m]) => ({ id, ...m })));
         broadcastUserCount(roomId);
-        socket.emit('joined', { roomId });
+        socket.emit('joined', { roomId, code: roomCodes.assign(roomId) });
         if (room.pin) socket.emit('lounge-pin', room.pin);
         if (room.locked) socket.emit('lounge-state', { locked: true });
         if (room.party) socket.emit('party', partyInfo(room));

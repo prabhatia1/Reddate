@@ -391,16 +391,17 @@ fun JoinCodeDialog(model: AppModel) {
     var busy by remember { mutableStateOf(false) }
     val box = remember { FocusRequester() }
     fun go() {
-        if (code.filter { it.isLetterOrDigit() }.length < 6) { error = "Type the code your friend sent you."; return }
+        if (busy) return
+        if (code.isBlank()) { error = "Enter the 5-character code or invite link your friend sent you."; return }
         busy = true; error = ""
         model.joinCode(code) { msg -> busy = false; if (msg != null) error = msg }
     }
     Dialog(onDismissRequest = { model.dialog = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.width(520.dp).clip(RoundedCornerShape(16.dp)).background(C.paper2).padding(28.dp)) {
             Text("Someone invited you?", style = MaterialTheme.typography.headlineSmall, color = C.ink)
-            Text("Enter the code to join the party.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+            Text("Enter a 5-character code or paste an invite link. Phones, browsers and TVs join the same party.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(18.dp))
-            TvTextField(code, { code = it.uppercase().filter { c -> c.isLetterOrDigit() || c == '-' }.take(12); error = "" }, "ABCD-EFGH", ::go, Modifier.fillMaxWidth().focusRequester(box))
+            TvTextField(code, { code = it.take(2048); error = "" }, "A7B2C or invite link", ::go, Modifier.fillMaxWidth().focusRequester(box))
             if (error.isNotEmpty()) Text(error, color = C.accent, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 10.dp))
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -416,13 +417,22 @@ fun JoinCodeDialog(model: AppModel) {
 @Composable
 fun TogetherDialog(model: AppModel) {
     val first = remember { FocusRequester() }
+    var roomCode by remember { mutableStateOf("") }
+    var codeError by remember { mutableStateOf("") }
     Dialog(onDismissRequest = { model.dialog = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.width(480.dp).clip(RoundedCornerShape(16.dp)).background(C.paper2).padding(28.dp)) {
             Text("Watch together", style = MaterialTheme.typography.headlineSmall, color = C.ink)
             Text("Watch in sync with friends, on any screen.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+            Spacer(Modifier.height(16.dp))
+            TvTextField(roomCode, { roomCode = it.uppercase().take(5); codeError = "" }, "Your code (optional)", {}, Modifier.fillMaxWidth())
+            Text("Leave blank to generate a 5-character code.", color = C.muted, style = MaterialTheme.typography.bodySmall)
+            if (codeError.isNotEmpty()) Text(codeError, color = C.accent, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(20.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                PillButton("Start a party", { model.dialog = null; model.together() }, primary = true, icon = Icons.Default.Share, modifier = Modifier.focusRequester(first))
+                PillButton("Start a party", {
+                    if (roomCode.isNotEmpty() && !Regex("^[A-Z0-9]{5}$").matches(roomCode)) codeError = "Use exactly 5 letters or numbers."
+                    else { model.dialog = null; model.together(roomCode) }
+                }, primary = true, icon = Icons.Default.Share, modifier = Modifier.focusRequester(first))
                 PillButton("Join with a code", { model.dialog = Dlg.JoinCode })
             }
         }

@@ -4,6 +4,26 @@
 
 <h1 align="center">Reddate</h1>
 
+Party invitations use five letters or numbers, for example `A7B2C`. Create a
+party with an optional custom code, or leave it blank to generate one. Browsers
+and Android TVs join by typing that code or pasting an invite link. Previous
+eight-character codes and links still work. Joining waits for server confirmation;
+invalid codes, closed rooms and account/profile restrictions show an error.
+
+`reddate.xyz`, `tv.reddate.xyz` and Android TV must use the same TV server process
+to share rooms. This branch serves the browser app on `reddate.xyz` by default.
+If `reddate.xyz` continues running the `main` branch, its lobby sends new parties
+to `https://tv.reddate.xyz`; set `SHARED_PARTY_URL` there for another shared server.
+Keep the Android app's start URL pointed at that same service. Room state is in
+memory, so independent deployments do not share rooms.
+
+The browser Language menu supports live native/HLS track switching and the
+embedded MP4/MKV audio fallback from `main`. Install FFmpeg and ffprobe on the TV
+server for that fallback, or set `FFMPEG_PATH` and `FFPROBE_PATH`. Android TV
+switches tracks through its native player. Both remember the viewer's language
+for later videos, preserve playback position, and keep the choice local to that
+viewer. Temporary audio buffering holds only that viewer's picture.
+
 <p align="center">
   <b>Movie night, in sync.</b><br>
   An open-source watch-party app for Android TV, phones and browsers.<br>

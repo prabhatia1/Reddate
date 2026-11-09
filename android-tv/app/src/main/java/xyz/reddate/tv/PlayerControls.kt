@@ -1218,12 +1218,13 @@ class PlayerControls(
         if (entries.isEmpty()) return
         audioAuto = true
         if (entries.size < 2) return
-        val mine = listOf(Locale.getDefault().getDisplayLanguage(Locale.ENGLISH).lowercase(), "english").distinct()
-        var idx = entries.indexOfFirst { (_, _, f) ->
+        val remembered = activity.getSharedPreferences("reddate-player", 0).getString("audio-language", "") ?: ""
+        val mine = listOf(remembered, Locale.getDefault().getDisplayLanguage(Locale.ENGLISH).lowercase(), "english").filter { it.isNotEmpty() }.distinct()
+        var idx = mine.firstNotNullOfOrNull { wanted -> entries.indexOfFirst { (_, _, f) ->
             var name = xyz.reddate.tv.Langs.nameOf(f.language)
             if (name.isEmpty() && !f.label.isNullOrEmpty()) name = xyz.reddate.tv.Langs.scan(f.label!!).firstOrNull() ?: ""
-            name in mine
-        }
+            name == wanted
+        }.takeIf { it >= 0 } } ?: -1
         if (idx < 0) {
             // Tracks without language tags: the file name usually lists the languages in track order.
             val guess = guessedAudioLangs()
@@ -1315,6 +1316,8 @@ class PlayerControls(
                 val ch = when (f.channelCount) { 1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "" }
                 val sub = listOf(codecLabel(f), ch, if (guessed) "language from the file name" else "").filter { it.isNotEmpty() }.joinToString(" · ")
                 add(row(title, sub, sel) {
+                    audioAuto = true
+                    activity.getSharedPreferences("reddate-player", 0).edit().putString("audio-language", langName).apply()
                     p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
                         .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
                 }, sel)

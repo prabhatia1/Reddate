@@ -81,6 +81,7 @@ export function Watch({ joinCode }: { joinCode?: string }) {
                         <h2>No party right now</h2>
                         <p className="note" style={{ margin: '8px 0 16px' }}>Start one from any title with “Watch together”, or join with a code.</p>
                         <JoinBox onJoin={code => go('/join/' + code)} />
+                        <CreateBox />
                     </>
                 )}
             </div>
@@ -91,7 +92,7 @@ export function Watch({ joinCode }: { joinCode?: string }) {
 /** A party link was opened: the code, the link to pass on (copy / share), and who you'll join as. */
 function JoinPage({ code, joining, onJoin }: { code: string; joining: boolean; onJoin: () => void }) {
     const { st, refresh, toast } = useApp();
-    const pretty = code.toUpperCase().replace(/^(.{4})(.+)$/, '$1-$2');
+    const pretty = code.length === 8 ? code.toUpperCase().replace(/^(.{4})(.+)$/, '$1-$2') : code.toUpperCase();
     const link = `${location.origin}/join/${code.toUpperCase()}`;
     const [copied, setCopied] = useState(false);
     async function copy() {
@@ -135,12 +136,38 @@ function JoinPage({ code, joining, onJoin }: { code: string; joining: boolean; o
 
 function JoinBox({ onJoin }: { onJoin: (c: string) => void }) {
     const [c, setC] = useState('');
+    const [error, setError] = useState('');
     return (
-        <form onSubmit={e => { e.preventDefault(); const code = c.replace(/[^A-Z0-9]/gi, '').toUpperCase(); if (code.length >= 6) onJoin(code); }} style={{ display: 'flex', gap: 8 }}>
-            <input className="input" placeholder="ABCD-EFGH" value={c} onChange={e => setC(e.target.value.toUpperCase())} maxLength={12} />
+        <form onSubmit={e => { e.preventDefault(); const invite = (window as any).partyCode.parse(c); if (invite) onJoin(invite.code); else setError('Enter a 5-character room code or valid invite link.'); }} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input className="input" placeholder="A7B2C or invite link" aria-label="Room code or invite link" value={c} onChange={e => { setC(e.target.value); setError(''); }} maxLength={2048} />
             <button className="btn primary">Join</button>
+            {error && <p role="alert" className="note" style={{ width: '100%' }}>{error}</p>}
         </form>
     );
+}
+
+function CreateBox() {
+    const { refresh } = useApp();
+    const [code, setCode] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+    return <form style={{ marginTop: 20 }} onSubmit={async e => {
+        e.preventDefault(); if (busy) return;
+        if (code && !/^[A-Z0-9]{5}$/.test(code)) { setError('Use exactly 5 letters or numbers.'); return; }
+        setBusy(true); setError('');
+        try {
+            const result = await engine.call<{ ok: boolean; message?: string }>('together', { code }, 25000);
+            if (!result?.ok) setError(result?.message || 'Could not start the party.');
+            else await refresh();
+        } catch (e: any) { setError(e.message || 'Could not start the party.'); }
+        finally { setBusy(false); }
+    }}>
+        <p className="note">Or create a party for browsers and TVs.</p>
+        <input className="input" aria-label="Your room code (optional)" placeholder="Your code (optional)" maxLength={5} value={code} onChange={e => { setCode(e.target.value.toUpperCase()); setError(''); }} />
+        <p className="note">Leave blank to generate a 5-character code.</p>
+        <button className="btn primary" disabled={busy}>{busy ? 'Creating…' : 'Create a party'}</button>
+        {error && <p className="note" role="alert">{error}</p>}
+    </form>;
 }
 
 // Chat works in the lobby too, before anything is playing.

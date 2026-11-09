@@ -588,15 +588,20 @@ class AppModel(private val scope: CoroutineScope) {
     /** Join someone's party by its code. Calls back with an error message, or null when it worked. */
     fun joinCode(code: String, done: (String?) -> Unit) = scope.launch {
         try {
-            val r = Engine.call("joinCode", JSONObject().put("code", code), timeoutMs = 15_000) as? JSONObject
+            val r = Engine.call("joinCode", JSONObject().put("code", code), timeoutMs = 30_000) as? JSONObject
             if (r != null && r.optBoolean("ok")) { dialog = null; home(); done(null) }
             else done(r?.optString("message")?.ifEmpty { null } ?: "Couldn’t join that party.")
         } catch (e: Exception) { done(e.message ?: "Couldn’t join that party.") }
     }
 
     /** "Watch together" with nothing picked yet: start an empty room and show how to join. */
-    fun together() = scope.launch {
-        try { val seq = ++inviteSeq; Engine.call("together"); awaitRoomThenInvite(seq = seq) } catch (e: Exception) { say(e.message ?: "Couldn’t start a room") }
+    fun together(code: String = "") = scope.launch {
+        try {
+            val seq = ++inviteSeq
+            val result = Engine.call("together", JSONObject().put("code", code), timeoutMs = 25_000) as? JSONObject
+            if (result?.optBoolean("ok") != true) { say(result?.optString("message") ?: "Couldn’t start a room"); return@launch }
+            awaitRoomThenInvite(seq = seq)
+        } catch (e: Exception) { say(e.message ?: "Couldn’t start a room") }
     }
 
     private suspend fun awaitRoomThenInvite(overWeb: Boolean = false, seq: Int) {
