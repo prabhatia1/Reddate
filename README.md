@@ -15,34 +15,21 @@ anywhere** can spin up a room and share the link. Styled after Reddit
 
 ## Features
 
-- **Five-character party codes and invite links** — join using a code such as
-  `A7B2C`, or paste/open an invite link. Creating a room automatically generates
-  a unique code to share. Codes accept either letter case.
-- **Browser and Android TV in one room** — new parties on `reddate.xyz` use the
-  TV service, so people from both websites and the Android TV app watch and chat
-  in the same room. Existing encrypted browser invite links keep working locally.
-
-For self-hosting both branches, run the `tv` server once and set
-`SHARED_PARTY_URL` on the `main` server to its address (for example,
-`http://localhost:3090`). For production, point both domains at the TV service,
-or keep `main` serving the browser lobby with `SHARED_PARTY_URL` pointing at the
-TV service. The public `reddate.xyz` lobby defaults to `https://tv.reddate.xyz`.
-Separate Node processes keep separate rooms; the shared service is what lets all
-devices use the same code. On the TV service, party chat follows the TV branch's
-privacy model and is relayed without end-to-end encryption.
-
-When running `main` on its own, code joiners receive the random room encryption
-key from a connected room member through an ephemeral ECDH/AES-GCM exchange.
-The server relays public keys and encrypted key transfers. Code lookup and peer
-discovery trust the relay; full encrypted invite links remain available.
-
+- **Automatic room codes and invite links** — creating a room generates a unique
+  five-character code, such as `A7B2C`. The code appears above the video with a
+  **Copy room code** button. Friends can join with the code or an invite link;
+  codes are case-insensitive.
+- **Shared browser and Android TV rooms** — new parties created through
+  `reddate.xyz` use the TV service, allowing browsers and Android TVs to watch
+  and chat in the same room. Existing encrypted browser invite links continue
+  to use the original browser server.
 - 🎬 **Synced video playback** — YouTube links *and* direct video URLs (`.mp4`,
   `.webm`, `.ogg`, …). Play, pause, seek and load together; late joiners and
   drifters auto-catch-up. Playback commands that arrive before a viewer's player
   is ready are buffered and applied on load, so nobody has to "press play first".
-- 🔒 **End-to-end encrypted chat** — messages are encrypted in the browser with
-  AES-GCM 256. The room key lives only in the invite link (after the `#`) and
-  never touches the server, which relays opaque ciphertext only.
+- 🔒 **End-to-end encrypted chat on the standalone browser server** — messages
+  use AES-GCM with a 256-bit key. The server relays encrypted messages and key
+  transfers without receiving the unencrypted room key.
 - 🎙️ **Lounge** — Discord-style: anyone in the room can hop in or out, up
   to 8 people, mic on and camera optional, with a speaking indicator.
   Peer-to-peer over WebRTC (a mesh), end-to-end encrypted by DTLS-SRTP;
@@ -155,7 +142,7 @@ Both are **per viewer** — each person picks their own; nothing is synced.
 
 ## How the privacy model works
 
-Reddate uses a shared-key end-to-end encryption scheme:
+When `main` runs on its own, browser rooms use shared-key end-to-end encryption:
 
 1. When you create a room, the browser generates a random room ID and a 256-bit
    AES-GCM key.
@@ -166,9 +153,19 @@ Reddate uses a shared-key end-to-end encryption scheme:
 4. Trigger-word reactions are detected locally on decrypted text, so no
    plaintext ever leaves your browser.
 
+Someone joining with a room code receives the encryption key from a connected
+room member through a temporary ECDH/AES-GCM key exchange. The server relays
+public keys and the encrypted key transfer. This flow relies on the server for
+code lookup and participant discovery; full encrypted invite links remain
+available.
+
+Rooms hosted by the shared TV service follow the `tv` branch's privacy model.
+Their chat is relayed without end-to-end encryption. The encryption details
+below apply to rooms hosted by the standalone `main` server.
+
 > **Note:** anyone with the invite link can read the room, so treat the link
-> like a password. This protects against a curious/compromised server, not
-> against someone you shared the link with. Chat history is never persisted.
+> like a password. Room codes also allow people to join while a room member is
+> connected. Chat history is never persisted.
 
 ### What is and isn't private
 
@@ -201,14 +198,35 @@ npm start          # or: npm run dev  (auto-reload with nodemon)
 ```
 
 Then open http://localhost:3000, enter a display name, and click
-**Create a room**. Copy the invite link and share it. Paste a YouTube or direct
+**Create a room**. Use **Copy room code** above the video or **Copy invite** in
+the header to invite friends. Paste a YouTube or direct
 video URL to start watching, and hit **📹 Start Call** for a 1:1 video chat.
 
 Set a custom port with `PORT=8080 npm start`.
 
+### Shared browser and Android TV rooms
+
+To let browsers and Android TVs join the same party, route them to the same
+`tv` server process. Each server keeps its rooms in memory, so separate
+processes do not share room codes or playback state.
+
+For local development, start the `tv` server on a port such as `3090`, then set
+this variable in the `main` server's `.env` file and restart it:
+
+```dotenv
+SHARED_PARTY_URL=http://localhost:3090
+```
+
+For production, either serve both domains from the TV service or keep `main`
+serving the browser lobby and set `SHARED_PARTY_URL` to the TV service's URL.
+The `reddate.xyz` lobby defaults to `https://tv.reddate.xyz` when the variable
+is unset. New parties use that shared service; existing encrypted browser
+invite links continue to use the `main` server.
+
 Optional environment variables (locally, put them in a `.env` file next to
 `server.js` — it's git-ignored; see `.env.example`):
 
+- `SHARED_PARTY_URL` — the TV service's URL for shared browser and Android TV rooms.
 - `SUPPORT_URL` — optional; shows a "Buy me a coffee" link (https only).
 - `GIPHY_API_KEY` — turns on the GIF picker. Get a free key at
   [developers.giphy.com](https://developers.giphy.com/) → *Create an App* → *API*.
