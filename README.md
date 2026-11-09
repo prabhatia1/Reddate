@@ -16,8 +16,8 @@ anywhere** can spin up a room and share the link. Styled after Reddit
 ## Features
 
 - **Five-character party codes and invite links** — join using a code such as
-  `A7B2C`, or paste/open an invite link. Hosts can pick an available code or leave
-  it blank to generate one. Codes accept either letter case.
+  `A7B2C`, or paste/open an invite link. Creating a room automatically generates
+  a unique code to share. Codes accept either letter case.
 - **Browser and Android TV in one room** — new parties on `reddate.xyz` use the
   TV service, so people from both websites and the Android TV app watch and chat
   in the same room. Existing encrypted browser invite links keep working locally.

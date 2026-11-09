@@ -344,25 +344,15 @@ io.on('connection', (socket) => {
 
     stats.observeOnline(io.engine.clientsCount);
     registerRoomCodes(socket, roomCodes, rooms, { encrypted: true });
-    socket.on('join-room', ({ roomId, username, roomCode } = {}, ack) => {
+    socket.on('join-room', ({ roomId, username } = {}, ack) => {
         if (typeof roomId !== 'string' || !roomId || roomId.length > MAX_ROOM_ID) return;
-        if (roomCode && !rooms.has(roomId)) {
-            const code = typeof roomCode === 'string' ? roomCode.trim().toUpperCase() : '';
-            if (!/^[A-Z0-9]{5}$/.test(code) || roomCodes.find(code)) {
-                const error = { ok: false, message: 'Use an available 5-character code containing letters or numbers.' };
-                if (typeof ack === 'function') ack(error);
-                return;
-            }
-        }
         username = (typeof username === 'string' ? username : '').slice(0, MAX_USERNAME).trim() || 'Guest';
 
         if (socket.data.roomId && socket.data.roomId !== roomId) leaveRoom(socket); // leave any previous room first
 
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
-        const creating = !rooms.has(roomId);
         const room = getRoom(roomId);
-        if (roomCode && creating) room.code = roomCode.trim().toUpperCase();
         socket.data.roomId = roomId;
         socket.data.username = username;
         socket.join(roomId);

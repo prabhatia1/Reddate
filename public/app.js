@@ -118,26 +118,50 @@ const appEl = document.getElementById('app');
 const usernameInput = document.getElementById('usernameInput');
 const lobbyBtn = document.getElementById('lobbyBtn');
 const lobbyTagline = document.getElementById('lobbyTagline');
+const lobbyTitle = document.getElementById('lobbyTitle');
+const lobbyError = document.getElementById('lobbyError');
+const createHint = document.getElementById('createHint');
+const joinInput = document.getElementById('joinInput');
+const joinBtn = document.getElementById('joinBtn');
 
 const existing = parseFragment();
 const isJoining = !!(existing.roomId && existing.keyB64);
 
 if (isJoining) {
     lobbyBtn.textContent = 'Join room';
+    lobbyTitle.textContent = 'Join your friends.';
     lobbyTagline.textContent = 'You\'ve been invited to a room. Pick a name and jump in.';
+    createHint.hidden = true;
 }
 
 usernameInput.focus();
-usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') lobbyBtn.click(); });
+usernameInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        (joinInput.value.trim() && !isJoining ? joinBtn : lobbyBtn).click();
+    }
+});
 
-const joinInput = document.getElementById('joinInput');
-const customCode = document.getElementById('customCode');
-const joinBtn = document.getElementById('joinBtn');
+const pathInvite = partyCode.parse(location.pathname + location.hash);
 const partyConfig = fetch('/party-config').then(r => r.json()).catch(() => ({ origin: '' }));
 partyConfig.then(config => {
-    if (config.origin && !isJoining) lobbyTagline.textContent = 'Create or join a party with browsers and Android TVs. Use a 5-character code or invite link.';
+    if (config.origin && !isJoining && !pathInvite) lobbyTagline.textContent = 'Create a room and watch together on phones, browsers, and Android TVs.';
 });
 if (isJoining) document.getElementById('roomOptions').hidden = true;
+
+function clearLobbyError() {
+    lobbyError.hidden = true;
+    lobbyError.textContent = '';
+    usernameInput.removeAttribute('aria-invalid');
+    joinInput.removeAttribute('aria-invalid');
+}
+function showLobbyError(message, input) {
+    lobbyError.textContent = message;
+    lobbyError.hidden = false;
+    if (input) { input.setAttribute('aria-invalid', 'true'); input.focus(); }
+}
+usernameInput.addEventListener('input', clearLobbyError);
+joinInput.addEventListener('input', clearLobbyError);
 
 async function inviteSocket() {
     if (!socket) socket = io();
@@ -161,20 +185,24 @@ function resolveCode(code) {
     });
 }
 async function enterFromLobby(joining) {
+    if (lobbyBtn.disabled || joinBtn.disabled) return;
+    clearLobbyError();
     const name = usernameInput.value.trim();
-    if (!name) { usernameInput.focus(); return; }
+    if (!name) { showLobbyError('Enter your name to create or join a room.', usernameInput); return; }
+    const invite = joining ? partyCode.parse(joinInput.value) : null;
+    if (joining && !invite) { showLobbyError('Enter a 5-character room code or a valid invite link.', joinInput); return; }
     currentUser = name;
+    const actionBtn = joining && !isJoining ? joinBtn : lobbyBtn;
+    const actionLabel = actionBtn.textContent;
+    actionBtn.textContent = joining || isJoining ? 'Joining…' : 'Creating…';
     lobbyBtn.disabled = joinBtn.disabled = true;
+    lobbyEl.setAttribute('aria-busy', 'true');
     try {
-        const invite = joining ? partyCode.parse(joinInput.value) : null;
-        if (joining && !invite) throw new Error('Enter a 5-character room code or a valid invite link.');
-        const chosen = customCode.value.trim().toUpperCase();
-        if (!joining && !isJoining && chosen && !/^[A-Z0-9]{5}$/.test(chosen)) throw new Error('Use exactly 5 letters or numbers for the room code.');
         const config = await partyConfig;
         // Both public websites create and join on the TV service. Existing
         // encrypted links continue to use this site's original relay.
         if (config.origin && !isJoining && !invite?.key) {
-            const path = joining ? `/join/${encodeURIComponent(invite.code)}` : `/classic?create=1&name=${encodeURIComponent(name)}&code=${encodeURIComponent(chosen)}`;
+            const path = joining ? `/join/${encodeURIComponent(invite.code)}` : `/classic?create=1&name=${encodeURIComponent(name)}`;
             location.assign(config.origin + path);
             return;
         }
@@ -190,26 +218,31 @@ async function enterFromLobby(joining) {
         } else {
             roomId = randomRoomId();
             roomKey = await generateRoomKey();
-            const result = await new Promise((resolve, reject) => socket.timeout(8000).emit('join-room', { roomId, username: currentUser, roomCode: chosen }, (error, data) => error ? reject(new Error('Could not create the room. Try again.')) : resolve(data)));
+            const result = await new Promise((resolve, reject) => socket.timeout(8000).emit('join-room', { roomId, username: currentUser }, (error, data) => error ? reject(new Error('Could not create the room. Try again.')) : resolve(data)));
             if (!result?.ok) throw new Error(result?.message || 'Could not create the room.');
             roomCode = result.code;
         }
         history.replaceState(null, '', `/#room=${encodeURIComponent(roomId)}&k=${await exportKey(roomKey)}`);
         startApp();
     } catch (error) {
-        showToast(error.message || 'Could not join the room. Try again.');
+        showLobbyError(error.message || 'Could not join the room. Try again.');
     } finally {
+        actionBtn.textContent = actionLabel;
         lobbyBtn.disabled = joinBtn.disabled = false;
+        lobbyEl.removeAttribute('aria-busy');
     }
 }
-const pathInvite = partyCode.parse(location.pathname + location.hash);
 lobbyBtn.addEventListener('click', () => enterFromLobby(!!pathInvite && !isJoining));
 joinBtn.addEventListener('click', () => enterFromLobby(true));
-joinInput.addEventListener('keydown', e => { if (e.key === 'Enter') joinBtn.click(); });
+joinInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); joinBtn.click(); }
+});
 if (!isJoining && pathInvite) {
     joinInput.value = pathInvite.code;
-    lobbyBtn.textContent = 'Join room';
-    customCode.closest('.field').hidden = true;
+    document.querySelector('.lobby-create').hidden = true;
+    document.querySelector('.lobby-divider').hidden = true;
+    lobbyTitle.textContent = 'Join your friends.';
+    lobbyTagline.textContent = 'You’ve been invited to a room. Enter your name and join.';
 }
 
 function showToast(msg) {
@@ -249,10 +282,13 @@ function startApp() {
     socket = socket || io();
     roomKeys.serve(socket, () => roomId, () => roomKey);
 
-    socket.on('connect', () => {
+    const markConnected = () => {
         document.getElementById('connectionStatus').classList.remove('disconnected');
         document.getElementById('connectionText').textContent = 'Connected';
-        socket.emit('join-room', { roomId, username: currentUser, roomCode });
+    };
+    socket.on('connect', () => {
+        markConnected();
+        socket.emit('join-room', { roomId, username: currentUser });
     });
     socket.on('disconnect', () => {
         document.getElementById('connectionStatus').classList.add('disconnected');
@@ -261,12 +297,14 @@ function startApp() {
 
     socket.on('joined', data => {
         roomCode = data.code || roomCode;
-        const badge = document.getElementById('roomCode');
-        badge.textContent = `Room ${roomCode}`;
-        badge.hidden = !roomCode;
+        document.getElementById('roomCode').textContent = roomCode;
+        document.getElementById('roomShare').hidden = !roomCode;
         addSystemMessage('🔒 Connected securely. Share the room code or invite link to bring someone in.');
     });
-    if (socket.connected) socket.emit('join-room', { roomId, username: currentUser, roomCode });
+    if (socket.connected) {
+        markConnected();
+        socket.emit('join-room', { roomId, username: currentUser });
+    }
     socket.on('user-count', c => {
         userCount = c;
         document.getElementById('userCount').textContent = `${c} online`;
@@ -964,6 +1002,16 @@ function wireControls() {
         socket.emit('typing-start');
         clearTimeout(typingTimer);
         typingTimer = setTimeout(() => socket.emit('typing-stop'), 1000);
+    });
+
+    document.getElementById('copyRoomCodeBtn').addEventListener('click', async () => {
+        if (!roomCode) return;
+        try {
+            await navigator.clipboard.writeText(roomCode);
+            showToast('Room code copied');
+        } catch {
+            prompt('Copy this room code:', roomCode);
+        }
     });
 
     document.getElementById('shareBtn').addEventListener('click', async () => {
