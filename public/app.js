@@ -141,6 +141,7 @@ if (isJoining) {
     createHint.hidden = true;
 }
 
+usernameInput.value = window.reddateBrowserSession.savedName();
 usernameInput.focus();
 usernameInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') {
@@ -225,7 +226,7 @@ async function enterFromLobby(joining) {
         } else {
             roomId = randomRoomId();
             roomKey = await generateRoomKey();
-            const result = await new Promise((resolve, reject) => socket.timeout(8000).emit('join-room', { roomId, username: currentUser }, (error, data) => error ? reject(new Error('Could not create the room. Try again.')) : resolve(data)));
+            const result = await new Promise((resolve, reject) => socket.timeout(8000).emit('join-room', { roomId, username: currentUser, resumeId: window.reddateBrowserSession.clientId() }, (error, data) => error ? reject(new Error('Could not create the room. Try again.')) : resolve(data)));
             if (!result?.ok) throw new Error(result?.message || 'Could not create the room.');
             roomCode = result.code;
         }
@@ -295,7 +296,7 @@ function startApp() {
     };
     socket.on('connect', () => {
         markConnected();
-        socket.emit('join-room', { roomId, username: currentUser });
+        socket.emit('join-room', { roomId, username: currentUser, resumeId: window.reddateBrowserSession.clientId() });
     });
     socket.on('disconnect', () => {
         roomJoined = false;
@@ -305,6 +306,7 @@ function startApp() {
 
     socket.on('joined', data => {
         roomJoined = true;
+        window.reddateBrowserSession.save({ roomId, roomCode: data.code, name: currentUser });
         window.tracks?.reportAudio(true);
         roomCode = data.code || roomCode;
         updateRoomShare();
@@ -360,7 +362,7 @@ function startApp() {
     // Register every replay listener before requesting the room snapshot.
     if (socket.connected) {
         markConnected();
-        socket.emit('join-room', { roomId, username: currentUser });
+        socket.emit('join-room', { roomId, username: currentUser, resumeId: window.reddateBrowserSession.clientId() });
     }
 }
 
@@ -1321,3 +1323,12 @@ function updatePollResults() {
         container.appendChild(div);
     });
 }
+
+async function restoreBrowserSession() {
+    if (!isJoining) return;
+    const saved = window.reddateBrowserSession.resumeForRoom(existing.roomId);
+    if (!saved) return;
+    usernameInput.value = saved.name;
+    await enterFromLobby(false);
+}
+restoreBrowserSession();

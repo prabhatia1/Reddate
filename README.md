@@ -43,6 +43,9 @@ anywhere** can spin up a room and share the link. Styled after Reddit
 - ⬆️⬇️ **Reddit-style UI** — subreddit-style header, OP tag, cosmetic upvote/downvote,
   and a "Comment" send button.
 - 🔗 **Shareable invite links** — create a room, copy the link, send it to anyone.
+- **Refresh without rejoining manually** — this tab remembers your name and room.
+  Refresh returns to the player automatically. The server keeps an empty room for
+  two minutes after a dropped connection so a refresh can recover its video state.
 - 👥 **Multi-participant rooms** — share the link with as many people as you like
   (voice holds up to 8; chat and video sync have no limit).
 - 🍿 **Browse movies & shows with Stremio/Nuvio addons** — paste any

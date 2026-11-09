@@ -4,7 +4,7 @@
 // symmetric key that lives only in the client URL fragment (#...), which is
 // never sent to the server. This process only relays opaque ciphertext and
 // never sees message plaintext. Nothing is persisted: rooms live in memory and
-// are discarded once empty, and chat history is never stored.
+// are discarded after a short reconnect grace period, and chat history is never stored.
 
 // Local development: read KEY=value lines from ./.env (git-ignored) into
 // process.env, without overriding variables already set (e.g. on Render).
@@ -242,6 +242,7 @@ const MAX_ADDONS_CIPHER = 32 * 1024; // encrypted addon list blob
 const MAX_STREAM_URL = 4096;
 const MAX_TITLE = 200;
 const MAX_SUBTITLE_CIPHER = 7 * 1024 * 1024;
+const EMPTY_ROOM_KEEP_MS = 2 * 60 * 1000;
 
 function stateNow(room) {
     const now = Date.now();
@@ -266,6 +267,7 @@ function getRoom(roomId) {
             subtitles: null, // opaque room-key ciphertext, scoped to the loaded video
             audio: null, // starting audio selection, encrypted with the same room key
             audioRevision: 0,
+            settingsOwnerResume: null,
             subtitleRevision: 0,
             watchEpoch: 0,
             // Voice room: socket id -> { username, muted, cam }. Audio/video go
@@ -329,7 +331,7 @@ function broadcastUserCount(roomId) {
     if (room) io.to(roomId).emit('user-count', room.users.size);
 }
 
-function leaveRoom(socket) {
+function leaveRoom(socket, keep = false) {
     const { roomId, username } = socket.data;
     if (!roomId) return;
     const room = rooms.get(roomId);
@@ -346,7 +348,13 @@ function leaveRoom(socket) {
             timestamp: Date.now()
         });
         broadcastUserCount(roomId);
-        if (room.users.size === 0) rooms.delete(roomId);
+        if (room.users.size === 0) {
+            clearTimeout(room.emptyTimer);
+            if (keep) {
+                room.emptyTimer = setTimeout(() => { if (rooms.get(roomId) === room && !room.users.size) rooms.delete(roomId); }, EMPTY_ROOM_KEEP_MS);
+                room.emptyTimer.unref();
+            } else rooms.delete(roomId);
+        }
     }
     socket.leave(roomId);
     socket.data.roomId = null;
@@ -367,7 +375,7 @@ io.on('connection', (socket) => {
 
     stats.observeOnline(io.engine.clientsCount);
     registerRoomCodes(socket, roomCodes, rooms, { encrypted: true });
-    socket.on('join-room', ({ roomId, username } = {}, ack) => {
+    socket.on('join-room', ({ roomId, username, resumeId } = {}, ack) => {
         if (typeof roomId !== 'string' || !roomId || roomId.length > MAX_ROOM_ID) return;
         username = (typeof username === 'string' ? username : '').slice(0, MAX_USERNAME).trim() || 'Guest';
 
@@ -376,6 +384,13 @@ io.on('connection', (socket) => {
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
         const room = getRoom(roomId);
+        clearTimeout(room.emptyTimer);
+        room.emptyTimer = null;
+        socket.data.resumeId = typeof resumeId === 'string' && /^[a-f0-9]{32}$/.test(resumeId) ? resumeId : null;
+        if (socket.data.resumeId && room.settingsOwnerResume === socket.data.resumeId) {
+            room.videoState.settingsOwner = socket.id;
+            io.to(roomId).emit('room-settings-owner', { mediaId: room.videoState.mediaId, settingsOwner: socket.id });
+        }
         socket.data.roomId = roomId;
         socket.data.username = username;
         socket.join(roomId);
@@ -447,6 +462,7 @@ io.on('connection', (socket) => {
         room.subtitles = null;
         room.audio = null;
         room.audioRevision = 0;
+        room.settingsOwnerResume = socket.data.resumeId;
         room.subtitleRevision = 0;
         // Which kind of video was started (counts only — never the title or link).
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
@@ -608,7 +624,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-        leaveRoom(socket);
+        leaveRoom(socket, true);
         stats.observeOnline(io.engine.clientsCount);
     });
 });
