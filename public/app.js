@@ -374,6 +374,7 @@ function startApp() {
     });
 
     socket.on('joined', data => {
+        window.reddateBrowserSession.save({ roomId: data.roomId, roomCode: data.code, name: currentUser });
         roomCode = data.code || roomCode;
         requireExistingRoom = false;
         const codeEl = document.getElementById('roomCode');
@@ -791,7 +792,7 @@ function joinRoomNow() {
         kind: v.kind, src: v.src, videoId: v.videoId, title: v.title, content: v.content,
         currentTime: Math.max(0, roomPos()), isPlaying: !!anchor.isPlaying, host: !!(party ? isHost() : true)
     } : null;
-    socket.emit('join-room', { roomId, username: currentUser, restore, requireExisting: requireExistingRoom });
+    socket.emit('join-room', { roomId, username: currentUser, restore, requireExisting: requireExistingRoom, resumeId: window.reddateBrowserSession.clientId() });
 }
 
 // Chat lines wait until the server confirms them: one typed during a reconnect is sent again once we're back.
@@ -958,6 +959,7 @@ function maybeAskSync() {
     else if (confirm(`Sync with ${host}? ${host} is at ${at}.`)) resync();
 }
 function leaveToHome() {
+    window.reddateBrowserSession.clear();
     destroyPlayer();
     try { if (typeof theater !== 'undefined' && theater) setTheater(false); } catch (e) { /* fine */ }
     setNowPlaying('');
@@ -2017,6 +2019,32 @@ function wireControls() {
 // ---------------- Start ----------------
 // After every script on the page has loaded (the Lounge and TV scripts come after this one).
 // Connect now; the screen depends on whether this is an invite link.
+function restoreBrowserRoom() {
+    if (FRAME) return false;
+    const saved = window.reddateBrowserSession.resumeForRoom(existing.roomId || leanCode);
+    if (!saved) return false;
+    if (window.reddateAccount && !window.reddateAccount.isReady()) {
+        document.addEventListener('reddate:account-ready', () => {
+            sayHello();
+            restoreBrowserRoom();
+        }, { once: true });
+        showScreen('room');
+        setPlayerStatus('Restoring your room…');
+        return true;
+    }
+    usernameInput.value = savedName() || saved.name;
+    const joined = waitForJoin();
+    enterRoom(usernameInput.value, saved.roomId, null, { requireExisting: true });
+    joined.then(result => {
+        if (!result?.ok) {
+            inRoom = false;
+            showScreen('lobby');
+            showLobbyError(result?.message || 'Could not restore the room. Try joining again.');
+        }
+    });
+    return true;
+}
+
 function boot() {
     startApp();
     const create = new URLSearchParams(location.search);
@@ -2026,6 +2054,7 @@ function boot() {
         enterFromLobby(false);
         return;
     }
+    if (restoreBrowserRoom()) return;
     const tv = document.documentElement.classList.contains('tv');
     if (existing.roomId || !tv) {
         if (existing.roomId) {

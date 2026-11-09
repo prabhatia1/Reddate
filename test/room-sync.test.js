@@ -26,7 +26,7 @@ test('TV late join gets live video, subtitles, offset and Off; stale selections 
     await new Promise((resolve, reject) => { server.stdout.on('data', data => { if (String(data).includes('server running')) resolve(); }); server.once('error', reject); server.once('exit', code => reject(new Error(`Server exited: ${code}`))); });
     const connect = async () => { const s = io(`http://localhost:${port}`, { transports: ['websocket'], reconnection: false }); t.after(() => s.disconnect()); await event(s, 'connect'); return s; };
     const roomId = 'tv-sync-regression'; const host = await connect();
-    let joined = event(host, 'joined'); host.emit('join-room', { roomId, username: 'Host' }); await joined;
+    let joined = event(host, 'joined'); host.emit('join-room', { roomId, username: 'Host', resumeId: 'a'.repeat(32) }); await joined;
     let loaded = event(host, 'video-loaded'); host.emit('load-video', { kind: 'direct', src: 'https://example.com/movie.mp4' }); const movie = await loaded;
     host.emit('video-playpause', { currentTime: 70, isPlaying: true });
     const state = { vtt: 'WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello', key: 'file:movie.vtt', lang: 'eng', label: 'English', offset: 1.5 };
@@ -51,8 +51,18 @@ test('TV late join gets live video, subtitles, offset and Off; stale selections 
         assert.deepEqual((await changed).state, { ...next, embeddedLang: next.embeddedLang || '' });
     }
     loaded = event(host, 'video-loaded'); host.emit('load-video', { kind: 'direct', src: 'https://example.com/movie.mp4' });
-    assert.notEqual((await loaded).mediaId, movie.mediaId);
+    const resetMovie = await loaded;
+    assert.notEqual(resetMovie.mediaId, movie.mediaId);
     assert.equal((await ack(host, 'set-subtitles', { mediaId: movie.mediaId, state })).ok, false);
+    await ack(host, 'set-audio', { mediaId: resetMovie.mediaId, state: audio });
+    host.disconnect(); guest.disconnect(); newcomer.disconnect();
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const returning = await connect(); joined = event(returning, 'joined');
+    const resumed = event(returning, 'video-sync'), resumedAudio = event(returning, 'audio-updated');
+    returning.emit('join-room', { roomId, username: 'Host', resumeId: 'a'.repeat(32) }); await joined;
+    const restored = await resumed;
+    assert.equal(restored.mediaId, resetMovie.mediaId); assert.equal(restored.settingsOwner, returning.id);
+    assert.deepEqual((await resumedAudio).state, audio);
 });
 
 test('TV player projects the room position while a newcomer loads', () => {
@@ -139,4 +149,22 @@ test('new viewers inherit delayed audio tracks and can keep personal audio and s
     const off = panel.children.flatMap(e => e.children || []).find(e => e.textContent === 'Off'); assert.ok(off);
     tracks.applyShared({ ...state, offset: 2 }); assert.equal(appends, 1); assert.equal(shared.length, 0);
     tracks.setMedia('next movie'); tracks.applyShared(state); assert.equal(appends, 2);
+});
+
+
+test('browser session restores only this tab?s joined room and keeps keys out of storage', async () => {
+    const session = new Map(), local = new Map();
+    const storage = map => ({ getItem: k => map.get(k) || null, setItem: (k, v) => map.set(k, v), removeItem: k => map.delete(k) });
+    const context = vm.createContext({ window: {}, sessionStorage: storage(session), localStorage: storage(local), crypto: require('node:crypto').webcrypto, Uint8Array });
+    vm.runInContext(fs.readFileSync(path.join(root, 'public/browser-session.js'), 'utf8'), context);
+    const helper = context.window.reddateBrowserSession;
+    helper.save({ roomId: 'room-a', roomCode: 'A7B2C', name: 'Alice' });
+    assert.equal(helper.resumeForRoom('room-a').name, 'Alice'); assert.equal(helper.resumeForRoom('A7B2C').roomId, 'room-a');
+    assert.equal(helper.resumeForRoom('room-b'), null); assert.equal(helper.savedName(), 'Alice');
+    const id = helper.clientId();
+    vm.runInContext(fs.readFileSync(path.join(root, 'public/browser-session.js'), 'utf8'), context);
+    assert.equal(context.window.reddateBrowserSession.clientId(), id);
+    assert.ok(!session.get('reddate-browser-session-v1').includes('key'));
+    helper.clear(); assert.equal(helper.resumeForRoom('room-a'), null); assert.equal(helper.savedName(), 'Alice');
+    session.set('reddate-browser-session-v1', '{broken'); assert.equal(helper.resumeForRoom('room-a'), null);
 });

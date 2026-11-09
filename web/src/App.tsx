@@ -107,7 +107,14 @@ export function App() {
             // A reload in the middle of a party: go straight back into that room (it waits for us).
             let back = '';
             try { back = sessionStorage.getItem('rd-room') || ''; sessionStorage.removeItem('rd-room'); } catch { /* fine */ }
-            if (back && s && s.signedIn && !s.inRoom && !/^\/join\//.test(stripBase(location.pathname))) go('/join/' + back, true);
+            if (back && s && s.signedIn && !s.inRoom && !/^\/join\//.test(stripBase(location.pathname))) {
+                try {
+                    const result = await engine.call<{ ok: boolean }>('joinCode', { code: back }, 25000);
+                    if (dead) return;
+                    if (result?.ok) { await refresh(); go('/watch', true); }
+                    else go('/join/' + back, true);
+                } catch { if (!dead) go('/join/' + back, true); }
+            }
             setBooted(true);
         })();
         return () => { dead = true; };

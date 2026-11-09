@@ -465,6 +465,7 @@ function getRoom(roomId) {
             subtitles: null,
             audio: null,
             audioRevision: 0,
+            settingsOwnerResume: null,
             subtitleRevision: 0,
             watchEpoch: 0,
             // Voice room: socket id -> { username, muted, cam }. Audio/video go
@@ -794,9 +795,10 @@ io.on('connection', (socket) => {
 
     stats.observeOnline(io.engine.clientsCount);
     registerRoomCodes(socket, roomCodes, rooms);
-    socket.on('join-room', async ({ roomId, username, restore, requireExisting } = {}) => {
+    socket.on('join-room', async ({ roomId, username, restore, requireExisting, resumeId } = {}) => {
         if (typeof roomId !== 'string' || !roomId || roomId.length > MAX_ROOM_ID) return;
         username = (typeof username === 'string' ? username : '').slice(0, MAX_USERNAME).trim() || 'Guest';
+        socket.data.resumeId = typeof resumeId === 'string' && /^[a-f0-9]{32}$/.test(resumeId) ? resumeId : null;
         // Room joins a minute from one address (a reconnect loop or a script making rooms), well above any real use.
         if (MAX_SOCKETS_PER_IP && !allowHit(`join:${socket.data.ip || socket.id}`, 90, 60000)) {
             socket.emit('system-message', { message: 'Too many room joins from this connection. Wait a minute and try again.', timestamp: Date.now() });
@@ -858,6 +860,11 @@ io.on('connection', (socket) => {
         stats.track('joins');
         const room = getRoom(roomId);
         if (rebuilt) { room.videoState = { ...rebuilt, mediaId: crypto.randomBytes(12).toString('hex'), settingsOwner: socket.id }; room.restoredAt = Date.now(); }
+        if (rebuilt) room.settingsOwnerResume = socket.data.resumeId;
+        if (socket.data.resumeId && room.settingsOwnerResume === socket.data.resumeId) {
+            room.videoState.settingsOwner = socket.id;
+            io.to(roomId).emit('room-settings-owner', { mediaId: room.videoState.mediaId, settingsOwner: socket.id });
+        }
         if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
         socket.data.roomId = roomId;
         socket.data.username = username;
@@ -1009,6 +1016,7 @@ io.on('connection', (socket) => {
         room.subtitles = null;
         room.audio = null;
         room.audioRevision = 0;
+        room.settingsOwnerResume = socket.data.resumeId;
         room.subtitleRevision = 0;
         // Which kind of video was started (counts only — never the title or link).
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
