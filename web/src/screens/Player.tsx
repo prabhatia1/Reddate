@@ -10,6 +10,7 @@ import { IBack, IChat, ISub, IAudio, IShare, IUsers, IPlay, IPause, IFull, IX, I
 import { Picker } from './Picker';
 import { SubsPanel, loadLook, saveLook, lookVars, SubLook } from './SubsPanel';
 import { InviteProfiles } from './InviteProfiles';
+import { RoomCode } from './RoomCode';
 import { YtVideo } from '../yt';
 import { chat as chatStore, useChat, ChatMsg } from '../chat';
 import { deviceName } from '../engine';
@@ -609,7 +610,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
                             {info.room ? (
                                 <>
                                     <div className="note">PARTY CODE · ANYONE WITH REDDATE CAN JOIN</div>
-                                    <div className="code">{info.room}</div>
+                                    <RoomCode code={info.room} />
                                     {qr && <div className="qr"><img alt="QR code to join" src={qr} width={180} height={180} /></div>}
                                     <div className="note">Scan to join from a phone or computer</div>
                                     <div className="note" style={{ margin: '10px 0 2px' }}>Or go to</div>

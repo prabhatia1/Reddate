@@ -343,7 +343,13 @@
 
     // "Invite phones": a QR code and link so phones can join this TV's room.
     async function showInvite() {
-        if (window.reddateRoom.goLive) window.reddateRoom.goLive(); // watching alone is a private room: inviting makes it a real one, with a code
+        const R = window.reddateRoom;
+        if (!R.isLive()) {
+            const joined = waitForJoin();
+            R.goLive(); // wait for the generated code before showing the invitation
+            const result = await joined;
+            if (!result?.ok) { showToast(result?.message || 'Could not create the room. Try again.'); return; }
+        }
         const link = `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(window.reddateRoom.roomCode() || roomId)}`;
         showScreen(c => {
             root.dataset.kind = 'invite';
@@ -604,12 +610,11 @@
         },
         leaveRoom() { window.reddateRoom.leave(); return true; },
         joinCode: ({ code }) => window.reddateJoinByCode(String(code || '')),
-        async together({ code = '' } = {}) {
+        async together() {
             const R = window.reddateRoom;
-            if (code && !/^[A-Z0-9]{5}$/i.test(code)) return { ok: false, message: 'Use exactly 5 letters or numbers.' };
             if (R.isInRoom() && R.isLive()) return { ok: true };
             const joined = waitForJoin();
-            R.enterRoom(R.savedName() || 'TV', null, null, { code: code.toUpperCase() });
+            R.enterRoom(R.savedName() || 'TV', null);
             R.goLive();
             return joined;
         },

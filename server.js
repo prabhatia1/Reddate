@@ -785,7 +785,7 @@ io.on('connection', (socket) => {
 
     stats.observeOnline(io.engine.clientsCount);
     registerRoomCodes(socket, roomCodes, rooms);
-    socket.on('join-room', async ({ roomId, username, restore, roomCode, requireExisting } = {}) => {
+    socket.on('join-room', async ({ roomId, username, restore, requireExisting } = {}) => {
         if (typeof roomId !== 'string' || !roomId || roomId.length > MAX_ROOM_ID) return;
         username = (typeof username === 'string' ? username : '').slice(0, MAX_USERNAME).trim() || 'Guest';
         // Room joins a minute from one address (a reconnect loop or a script making rooms), well above any real use.
@@ -796,10 +796,6 @@ io.on('connection', (socket) => {
 
         if (socket.data.helloP) await socket.data.helloP;
         if (requireExisting && !rooms.has(roomId)) { socket.emit('join-denied', { reason: 'none' }); return; }
-        if (roomCode && !rooms.has(roomId)) {
-            const code = typeof roomCode === 'string' ? roomCode.trim().toUpperCase() : '';
-            if (!/^[A-Z0-9]{5}$/.test(code) || roomCodes.find(code)) { socket.emit('join-denied', { reason: 'code', message: 'That code is invalid or already in use. Choose 5 letters or numbers.' }); return; }
-        }
         // A party (or any room a signed-in person is in) takes only signed-in people with a profile name.
         const present = rooms.get(roomId);
         const gated = present && present.users.size && (present.party || [...present.users.keys()].some(id => {
@@ -852,7 +848,6 @@ io.on('connection', (socket) => {
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
         const room = getRoom(roomId);
-        if (roomCode && !existingRoom) room.code = roomCode.trim().toUpperCase();
         if (rebuilt) { room.videoState = rebuilt; room.restoredAt = Date.now(); }
         if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
         socket.data.roomId = roomId;

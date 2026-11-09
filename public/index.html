@@ -118,21 +118,33 @@
         /* ---------- Lobby ---------- */
         .lobby {
             position: fixed; inset: 0; z-index: var(--z-modal);
-            display: grid; place-items: center; padding: var(--space-md);
+            display: grid; align-items: safe center; justify-items: center;
+            overflow-y: auto; padding: var(--space-lg) var(--space-md);
+            padding-top: max(var(--space-lg), env(safe-area-inset-top));
+            padding-bottom: max(var(--space-lg), env(safe-area-inset-bottom));
             background: var(--color-paper);
         }
         .lobby-card {
-            width: 100%; max-width: 25rem;
-            display: grid; gap: var(--space-md);
-            padding: var(--space-xl) var(--space-lg) var(--space-lg);
+            width: 100%; max-width: 29rem;
+            display: grid; gap: var(--space-lg);
+            padding: var(--space-xl);
             border: 1px solid var(--color-rule); border-radius: var(--radius-lg);
             background: var(--color-paper-2);
         }
         .lobby-card .wordmark { font-size: var(--text-lg); }
-        .lobby-tagline { color: var(--color-muted); font-size: var(--text-sm); margin-top: calc(-1 * var(--space-xs)); }
+        .lobby-header { display: grid; gap: var(--space-sm); }
+        .lobby-title { font-size: calc(var(--text-lg) * 1.25); margin-top: var(--space-xs); }
+        .lobby-tagline { color: var(--color-muted); font-size: var(--text-sm); }
         .field { display: grid; gap: var(--space-xs); }
         .field-label { font-size: var(--text-sm); font-weight: 700; }
-        .lobby-card .btn { width: 100%; }
+        .lobby-card .btn { width: 100%; min-height: 3rem; font-size: var(--text-base); }
+        .lobby-card .lobby-input { width: 100%; min-height: 3rem; font-size: var(--text-base); }
+        .lobby-create { display: grid; gap: var(--space-xs); }
+        .lobby-hint { color: var(--color-muted); font-size: var(--text-xs); }
+        .lobby-create .lobby-hint { text-align: center; }
+        .lobby-error { color: var(--color-error); font-size: var(--text-sm); overflow-wrap: anywhere; }
+        .lobby-input[aria-invalid="true"] { border-color: var(--color-error); }
+        @media (max-width: 30rem) { .lobby-card { padding: var(--space-lg); } }
         .privacy-note {
             display: flex; gap: var(--space-xs); align-items: flex-start;
             padding-top: var(--space-md); border-top: 1px solid var(--color-rule);
@@ -196,6 +208,16 @@
             padding-right: max(var(--space-md), env(safe-area-inset-right));
         }
         .post { display: grid; gap: var(--space-sm); max-width: 90rem; }
+        .room-share {
+            display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+            gap: var(--space-md); padding: var(--space-md);
+            border: 1px solid var(--color-rule); border-radius: var(--radius-md);
+            background: var(--color-paper-2);
+        }
+        .room-share-label { color: var(--color-muted); font-size: var(--text-xs); }
+        .room-share-code { display: block; font-size: var(--text-lg); letter-spacing: 0.1em; }
+        .room-share .btn { min-height: 2.75rem; }
+        html.tv .room-share, html.lean .room-share, html.lounge .room-share { display: none; }
         .post-meta {
             display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-xs);
             color: var(--color-muted); font-size: var(--text-xs);
@@ -809,6 +831,7 @@
         }
         .shell.theater .topbar,
         .shell.theater .post-meta,
+        .shell.theater .room-share,
         .shell.theater .now-playing,
         .shell.theater .player-status,
         .shell.theater .video-controls { display: none; }
@@ -943,15 +966,14 @@
 
         /* Tab bar: phones, on Home only */
         .tabbar { display: none; }
-        .lobby-code { display: grid; gap: var(--space-2xs); }
+        .lobby-code { display: grid; gap: var(--space-sm); }
         .lobby-code[hidden] { display: none; }
         .mp-empty { color: var(--color-muted); font-size: var(--text-sm); padding: var(--space-xs) 0; }
         .home-edit { display: flex; justify-content: center; padding: var(--space-lg) var(--space-md) 0; }
         .home-empty { display: grid; justify-items: center; gap: var(--space-sm); padding: var(--space-xl) var(--space-md); color: var(--color-muted); text-align: center; }
-        .lobby-or { color: var(--color-muted); font-size: var(--text-sm); text-align: center; }
-        .lobby-code-row { display: flex; gap: var(--space-xs); }
-        .lobby-code-row .lobby-input { flex: 1 1 auto; width: auto; min-width: 0; letter-spacing: 0.08em; text-transform: uppercase; }
-        .lobby-code-row .btn { flex: none; width: auto; padding: 0 var(--space-md); }
+        .lobby-or { display: flex; align-items: center; gap: var(--space-md); color: var(--color-muted); font-size: var(--text-xs); }
+        .lobby-or::before, .lobby-or::after { content: ''; flex: 1; height: 1px; background: var(--color-rule); }
+        .lobby-code-row { display: grid; gap: var(--space-sm); }
         .room-code { color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
         @media (max-width: 47.999rem) { .room-code { display: none; } } /* phones: the code is on the invite card */
         .invite-code { display: grid; justify-items: center; gap: var(--space-3xs); }
@@ -1566,25 +1588,32 @@
 
     <!-- Lobby -->
     <div class="lobby hidden" id="lobby">
-        <div class="lobby-card">
-            <span class="wordmark">r/Reddate</span>
-            <p class="lobby-tagline" id="lobbyTagline">Start a room, drop a video, and watch together.</p>
+        <div class="lobby-card" aria-labelledby="lobbyTitle">
+            <header class="lobby-header">
+                <span class="wordmark">r/Reddate</span>
+                <h1 class="lobby-title" id="lobbyTitle">Movie night starts here.</h1>
+                <p class="lobby-tagline" id="lobbyTagline">Create a room, share your code, and watch together.</p>
+            </header>
             <div class="field">
-                <label class="field-label" for="usernameInput">Pick a username</label>
-                <input type="text" class="lobby-input" id="usernameInput" placeholder="throwaway_42" maxlength="40" autocomplete="off">
+                <label class="field-label" for="usernameInput">Your name</label>
+                <input type="text" class="lobby-input" id="usernameInput" placeholder="What should we call you?" maxlength="40" autocomplete="nickname" required aria-describedby="nameHint lobbyError">
+                <p class="lobby-hint" id="nameHint">This is the name your friends will see.</p>
             </div>
-            <div class="field" id="customCodeField">
-                <label class="field-label" for="customCode">Your room code (optional)</label>
-                <input class="lobby-input mono" id="customCode" placeholder="A7B2C — leave blank to generate" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false">
+            <div class="lobby-create" id="lobbyCreate">
+                <button type="button" class="btn btn-primary" id="lobbyBtn">Create a room</button>
+                <p class="lobby-hint" id="createHint">We’ll generate a 5-character code for you to share.</p>
             </div>
-            <button class="btn btn-primary" id="lobbyBtn">Create a room</button>
             <div class="lobby-code" id="lobbyCode">
-                <span class="lobby-or">or join a friend’s room</span>
+                <span class="lobby-or" aria-hidden="true">or</span>
                 <div class="lobby-code-row">
-                    <input type="text" class="lobby-input mono" id="codeInput" placeholder="A7B2C or invite link" maxlength="2048" autocomplete="off" spellcheck="false" aria-label="Room code or invite link">
-                    <button class="btn" id="codeBtn">Join</button>
+                    <div class="field">
+                        <label class="field-label" for="codeInput">Join with a code or invite link</label>
+                        <input type="text" class="lobby-input" id="codeInput" placeholder="A7B2C or paste an invite link" maxlength="2048" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-describedby="lobbyError" enterkeyhint="go">
+                    </div>
+                    <button type="button" class="btn" id="codeBtn">Join a room</button>
                 </div>
             </div>
+            <p class="lobby-error" id="lobbyError" role="alert" hidden></p>
             <div class="lobby-account" id="lobbyAccount" hidden></div>
             <a class="lobby-support" id="supportLobby" href="#" target="_blank" rel="noopener noreferrer" hidden>
                 <svg class="icon" aria-hidden="true"><use href="#i-coffee"/></svg>Enjoying it? Buy me a coffee
@@ -1743,6 +1772,14 @@
                             <svg class="icon" aria-hidden="true"><use href="#i-arrow-big-down"/></svg>
                         </button>
                     </div>
+                </div>
+
+                <div class="room-share" id="roomShare" hidden>
+                    <div>
+                        <p class="room-share-label">Room code · share it with your friends</p>
+                        <strong class="room-share-code mono" id="shareRoomCode"></strong>
+                    </div>
+                    <button type="button" class="btn" id="copyRoomCodeBtn">Copy room code</button>
                 </div>
 
                 <h1 class="now-playing" id="nowPlaying"></h1>

@@ -13,16 +13,12 @@ function createRoomCodes(rooms) {
         const room = rooms.get(code);
         return room ? { roomId: code, room } : null;
     }
-    function assign(roomId, preferred = '') {
+    function assign(roomId) {
         const room = rooms.get(roomId);
         if (!room) throw new Error('That party has ended.');
         if (room.code) return room.code;
-        let code = preferred.trim().toUpperCase();
-        if (code && !/^[A-Z0-9]{5}$/.test(code)) throw new Error('Use exactly 5 letters or numbers for the room code.');
-        if (code && find(code)) throw new Error('That code is already in use. Choose another code.');
-        if (!code) {
-            do { code = Array.from({ length: 5 }, () => chars[crypto.randomInt(chars.length)]).join(''); } while (find(code));
-        }
+        let code;
+        do { code = Array.from({ length: 5 }, () => chars[crypto.randomInt(chars.length)]).join(''); } while (find(code));
         room.code = code;
         return code;
     }

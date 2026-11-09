@@ -4,9 +4,9 @@
 
 <h1 align="center">Reddate</h1>
 
-Party invitations use five letters or numbers, for example `A7B2C`. Create a
-party with an optional custom code, or leave it blank to generate one. Browsers
-and Android TVs join by typing that code or pasting an invite link. Previous
+Party invitations use five letters or numbers, for example `A7B2C`. Creating a
+party automatically generates a unique code. Use **Copy room code** to share it.
+Browsers and Android TVs join by typing that code or pasting an invite link. Previous
 eight-character codes and links still work. Joining waits for server confirmation;
 invalid codes, closed rooms and account/profile restrictions show an error.
 

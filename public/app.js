@@ -29,7 +29,7 @@ function parseFragment() {
 // ---------------- App state ----------------
 let socket = null;
 let roomId = null;
-let roomCode = '', preferredCode = '', requireExistingRoom = false;
+let roomCode = '', requireExistingRoom = false;
 let joinWaiters = [];
 function finishJoin(result) { const pending = joinWaiters; joinWaiters = []; pending.forEach(f => f(result)); }
 function waitForJoin() {
@@ -134,7 +134,6 @@ function goLive() {
 
 // Join (or create) a room and show the player. `then` runs once we're in. opts.lazy: just watching alone, no room yet.
 function enterRoom(name, id, then, opts) {
-    preferredCode = opts?.code || '';
     requireExistingRoom = !!opts?.requireExisting;
     const lazy = !!(opts && opts.lazy) && !inRoom && !id;
     if (inRoom && !roomLive && !(opts && opts.lazy)) {
@@ -153,6 +152,7 @@ function enterRoom(name, id, then, opts) {
     const codeEl = document.getElementById('roomCode');
     codeEl.textContent = !lazy && prettyCode(roomId) ? `Room ${prettyCode(roomId)}` : '';
     codeEl.hidden = lazy || !prettyCode(roomId);
+    renderShareCode();
     showScreen('room');
     if (!inRoom || switching) {
         inRoom = true;
@@ -184,15 +184,27 @@ window.reddateRoom = {
 
 // Phones and computers open on the lobby: pick a name, then create a room or join one by its code.
 // Invite links open the same card as "Join room". (The TV app opens on Home instead.)
-usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') lobbyBtn.click(); });
-lobbyBtn.addEventListener('click', () => {
-    const name = usernameInput.value.trim();
-    if (!name) { usernameInput.focus(); return; }
-    const code = document.getElementById('customCode').value.trim().toUpperCase();
-    if (!existing.roomId && code && !/^[A-Z0-9]{5}$/.test(code)) { showToast('Use exactly 5 letters or numbers'); return; }
-    enterRoom(name, existing.roomId || null, null, { code });
-});
 const codeInput = document.getElementById('codeInput');
+const codeBtn = document.getElementById('codeBtn');
+const lobbyError = document.getElementById('lobbyError');
+function clearLobbyError() {
+    lobbyError.hidden = true;
+    lobbyError.textContent = '';
+    usernameInput.removeAttribute('aria-invalid');
+    codeInput.removeAttribute('aria-invalid');
+}
+function showLobbyError(message, input) {
+    lobbyError.textContent = message;
+    lobbyError.hidden = false;
+    if (input) { input.setAttribute('aria-invalid', 'true'); input.focus(); }
+}
+usernameInput.addEventListener('input', clearLobbyError);
+codeInput.addEventListener('input', clearLobbyError);
+usernameInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); (codeInput.value.trim() && !existing.roomId ? codeBtn : lobbyBtn).click(); }
+});
+lobbyBtn.addEventListener('click', () => enterFromLobby(false));
+codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); codeBtn.click(); } });
 // Is anyone in a room with this code right now? (Typing a wrong code shouldn't quietly create an empty room.)
 function roomExists(code) {
     return new Promise(resolve => {
@@ -210,18 +222,41 @@ function askToSignIn(msg) {
     const A = window.reddateAccount;
     if (A && A.open) A.open();
 }
-async function joinByCode() {
-    const code = parseCode(codeInput.value);
-    if (!code) { showToast('Enter a 5-character room code or invite link'); codeInput.focus(); return; }
+async function enterFromLobby(joining) {
+    if (lobbyBtn.disabled || codeBtn.disabled) return;
+    clearLobbyError();
+    const code = joining ? parseCode(codeInput.value) : '';
+    if (joining && !code) { showLobbyError('Enter a 5-character room code or a valid invite link.', codeInput); return; }
     let name = usernameInput.value.trim();
-    if (LEAN) {
+    if (joining && LEAN) {
         name = accountName();
         if (!name) { askToSignIn('Sign in with your Reddate account and pick a profile to join'); return; }
-    } else if (!name) { showToast('Pick a username first'); usernameInput.focus(); return; }
-    const found = await roomExists(code);
-    if (!found?.ok) { showToast(found?.message || 'That party has ended.'); codeInput.focus(); return; }
-    enterRoom(name, found.roomId, null, { requireExisting: true });
+    } else if (!name) { showLobbyError('Enter your name to create or join a room.', usernameInput); return; }
+    const actionBtn = joining ? codeBtn : lobbyBtn;
+    const label = actionBtn.textContent;
+    actionBtn.textContent = joining || existing.roomId ? 'Joining…' : 'Creating…';
+    lobbyBtn.disabled = codeBtn.disabled = true;
+    lobbyEl.setAttribute('aria-busy', 'true');
+    try {
+        let id = existing.roomId || null;
+        if (joining) {
+            const found = await roomExists(code);
+            if (!found?.ok) { showLobbyError(found?.message || 'That party has ended.', codeInput); return; }
+            id = found.roomId;
+        }
+        const joined = waitForJoin();
+        enterRoom(name, id, null, { requireExisting: !!id });
+        const result = await joined;
+        if (!result?.ok) { inRoom = false; showScreen('lobby'); showLobbyError(result?.message || 'Could not join the room. Try again.'); }
+    } catch (error) {
+        showLobbyError(error.message || 'Could not join the room. Try again.');
+    } finally {
+        actionBtn.textContent = label;
+        lobbyBtn.disabled = codeBtn.disabled = false;
+        lobbyEl.removeAttribute('aria-busy');
+    }
 }
+function joinByCode() { return enterFromLobby(true); }
 window.reddateJoinByCode = async text => {
     const code = parseCode(text);
     if (!code) return { ok: false, message: 'Enter a 5-character room code or invite link.' };
@@ -233,13 +268,13 @@ window.reddateJoinByCode = async text => {
     // Joining a room already joined needs no new server event.
     return result;
 };
-document.getElementById('codeBtn').addEventListener('click', joinByCode);
+codeBtn.addEventListener('click', joinByCode);
 if (LEAN) {
     // The guest page: join only, with your account and profile.
-    lobbyBtn.hidden = true;
-    document.getElementById('customCodeField').hidden = true;
+    document.getElementById('lobbyCreate').hidden = true;
     const f = usernameInput.closest('.field'); if (f) f.hidden = true;
-    const or = document.querySelector('.lobby-or'); if (or) or.textContent = 'Join a watch party with its code';
+    document.querySelector('.lobby-or').hidden = true;
+    document.getElementById('lobbyTitle').textContent = LOUNGE ? 'Join the lounge.' : 'Join your friends.';
     if (leanCode) codeInput.value = prettyCode(leanCode) || leanCode;
     const tag = document.getElementById('lobbyTagline'); if (tag) tag.textContent = 'Sign in with your Reddate account and pick a profile to join.';
     document.title = LOUNGE ? 'Lounge · Reddate' : 'Join a watch party · Reddate';
@@ -344,9 +379,10 @@ function startApp() {
         const codeEl = document.getElementById('roomCode');
         codeEl.textContent = roomCode ? `Room ${roomCode}` : '';
         codeEl.hidden = !roomCode;
+        renderShareCode();
         finishJoin({ ok: true });
         if (window.reddateNativeInfo) window.reddateNativeInfo();
-        addSystemMessage('Connected. Share the invite link to bring someone in.');
+        addSystemMessage('Connected. Share the room code or invite link to bring someone in.');
         setTimeout(flushChat, 300); // anything typed while we were away
         const q = afterJoin; afterJoin = []; q.forEach(f => f());
     });
@@ -723,7 +759,7 @@ function joinRoomNow() {
         kind: v.kind, src: v.src, videoId: v.videoId, title: v.title, content: v.content,
         currentTime: Math.max(0, roomPos()), isPlaying: !!anchor.isPlaying, host: !!(party ? isHost() : true)
     } : null;
-    socket.emit('join-room', { roomId, username: currentUser, restore, roomCode: preferredCode || roomCode, requireExisting: requireExistingRoom });
+    socket.emit('join-room', { roomId, username: currentUser, restore, requireExisting: requireExistingRoom });
 }
 
 // Chat lines wait until the server confirms them: one typed during a reconnect is sent again once we're back.
@@ -840,6 +876,10 @@ const clockText = sec => { const t = Math.max(0, Math.floor(sec)); const h = Mat
 // Never further than the video is long (a room left "playing" for hours would say it's hours ahead).
 const behindBy = () => (vp ? Math.min(roomPos(), currentDuration > 0 ? currentDuration : Infinity) - vp.getCurrentTime() : 0);
 
+function renderShareCode() {
+    document.getElementById('shareRoomCode').textContent = roomCode;
+    document.getElementById('roomShare').hidden = !roomLive || !roomCode;
+}
 function renderRoomChip() {
     const codeEl = document.getElementById('roomCode');
     const base = prettyCode(roomId) ? `Room ${prettyCode(roomId)}` : '';
@@ -848,6 +888,7 @@ function renderRoomChip() {
     if (party && !isHost() && detached) bits.push('Not synced');
     codeEl.textContent = bits.filter(Boolean).join(' · ');
     codeEl.hidden = !codeEl.textContent;
+    renderShareCode();
 }
 function setDetached(on) {
     if (detached === on) return;
@@ -888,7 +929,8 @@ function leaveToHome() {
     destroyPlayer();
     try { if (typeof theater !== 'undefined' && theater) setTheater(false); } catch (e) { /* fine */ }
     setNowPlaying('');
-    inRoom = false; roomLive = true; party = null; detached = false; roomId = null; roomCode = ''; preferredCode = ''; requireExistingRoom = false;
+    inRoom = false; roomLive = true; party = null; detached = false; roomId = null; roomCode = ''; requireExistingRoom = false;
+    renderShareCode();
     history.replaceState(null, '', `${location.pathname}${location.search}`);
     showScreen(document.documentElement.classList.contains('tv') ? 'home' : 'lobby');
 }
@@ -1860,6 +1902,11 @@ function wireControls() {
         typingTimer = setTimeout(() => socket.emit('typing-stop'), 1000);
     });
 
+    document.getElementById('copyRoomCodeBtn').addEventListener('click', async () => {
+        if (!roomCode || !roomLive) return;
+        try { await navigator.clipboard.writeText(roomCode); showToast('Room code copied'); }
+        catch { prompt('Copy this room code:', roomCode); }
+    });
     document.getElementById('shareBtn').addEventListener('click', async () => {
         const link = location.href;
         try {
@@ -1908,21 +1955,19 @@ function boot() {
     startApp();
     const create = new URLSearchParams(location.search);
     if (location.pathname === '/classic' && create.get('create') === '1') {
-        const code = (create.get('code') || '').toUpperCase();
         usernameInput.value = create.get('name') || savedName() || 'Guest';
-        document.getElementById('customCode').value = code;
         history.replaceState(null, '', '/classic');
-        if (code && !/^[A-Z0-9]{5}$/.test(code)) { showScreen('lobby'); showToast('Use exactly 5 letters or numbers'); return; }
-        enterRoom(usernameInput.value, null, null, { code });
+        enterFromLobby(false);
         return;
     }
     const tv = document.documentElement.classList.contains('tv');
     if (existing.roomId || !tv) {
         if (existing.roomId) {
             lobbyBtn.textContent = 'Join room';
+            document.getElementById('lobbyTitle').textContent = 'Join your friends.';
             document.getElementById('lobbyTagline').textContent = 'You’ve been invited to watch together. Pick a name and jump in.';
             document.getElementById('lobbyCode').hidden = true;
-            document.getElementById('customCodeField').hidden = true;
+            document.getElementById('createHint').hidden = true;
         }
         usernameInput.value = savedName();
         showScreen('lobby');
