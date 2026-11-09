@@ -61,6 +61,7 @@ let socket = null;
 let roomKey = null;      // CryptoKey
 let roomId = null;
 let roomCode = '';
+let roomJoined = false;
 let currentUser = 'Guest';
 
 let vp = null;              // unified player adapter (YouTube or HTML5 <video>)
@@ -291,14 +292,15 @@ function startApp() {
         socket.emit('join-room', { roomId, username: currentUser });
     });
     socket.on('disconnect', () => {
+        roomJoined = false;
         document.getElementById('connectionStatus').classList.add('disconnected');
         document.getElementById('connectionText').textContent = 'Disconnected';
     });
 
     socket.on('joined', data => {
+        roomJoined = true;
         roomCode = data.code || roomCode;
-        document.getElementById('roomCode').textContent = roomCode;
-        document.getElementById('roomShare').hidden = !roomCode;
+        updateRoomShare();
         addSystemMessage('🔒 Connected securely. Share the room code or invite link to bring someone in.');
     });
     if (socket.connected) {
@@ -349,7 +351,8 @@ function startApp() {
         roomId,
         encrypt: obj => encryptText(roomKey, JSON.stringify(obj)),
         decrypt: async payload => JSON.parse(await decryptText(roomKey, payload)),
-        toast: showToast
+        toast: showToast,
+        loadVideo: requestVideoLoad
     });
 }
 
@@ -588,14 +591,46 @@ function triggerRain(emoji) {
 // A room can play a YouTube video OR a direct video-file URL (.mp4/.webm/…).
 // Both are wrapped in a small adapter (`vp`) with a common play/pause/seek API
 // so the sync logic below doesn't care which kind is loaded.
-let ytApiReady = false;
-function onYouTubeIframeAPIReady() { ytApiReady = true; }
-window.onYouTubeIframeAPIReady = onYouTubeIframeAPIReady;
+let playerGeneration = 0;
+let playerFailed = false;
+let youtubeApiPromise = null;
+function loadYouTubeApi() {
+    if (window.YT?.Player) return Promise.resolve(window.YT);
+    if (youtubeApiPromise) return youtubeApiPromise;
+    youtubeApiPromise = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        const previous = window.onYouTubeIframeAPIReady;
+        const cleanup = () => {
+            clearTimeout(timer);
+            if (window.onYouTubeIframeAPIReady === ready) window.onYouTubeIframeAPIReady = previous;
+            script.onerror = null;
+        };
+        const failed = () => {
+            cleanup(); script.remove(); youtubeApiPromise = null;
+            reject(new Error('Could not reach YouTube. Check your connection and try again.'));
+        };
+        const ready = () => {
+            if (!window.YT?.Player) { failed(); return; }
+            cleanup();
+            try { if (previous) previous(); } catch (_) { /* another listener must not block this player */ }
+            resolve(window.YT);
+        };
+        const timer = setTimeout(failed, 15000);
+        window.onYouTubeIframeAPIReady = ready;
+        script.src = 'https://www.youtube.com/iframe_api';
+        script.async = true;
+        script.onerror = failed;
+        document.head.appendChild(script);
+    });
+    return youtubeApiPromise;
+}
 
 function stageEl() { return document.getElementById('videoPlayer'); }
 function consumeIgnore() { const i = ignoreNextStateChange; ignoreNextStateChange = false; return i; }
 
 function destroyPlayer() {
+    playerGeneration++;
+    playerFailed = false;
     if (vp && vp.destroy) { try { vp.destroy(); } catch (_) {} }
     vp = null;
     isPlayerReady = false;
@@ -624,44 +659,68 @@ function applyPending() {
 }
 
 function createYouTubePlayer(videoId) {
-    if (!window.YT || !YT.Player) { setTimeout(() => createYouTubePlayer(videoId), 300); return; }
     destroyPlayer();
-    if (window.tracks) window.tracks.attachYouTube();
     currentSrc = videoId;
-    const mount = document.createElement('div');
-    stageEl().appendChild(mount);
-    const yt = new YT.Player(mount, {
-        height: '100%', width: '100%', videoId,
-        playerVars: { autoplay: 0, controls: 1, rel: 0, modestbranding: 1 },
-        events: {
-            onReady: () => { isPlayerReady = true; updatePlayPauseButton(); applyPending(); },
-            onStateChange: (e) => {
-                if (consumeIgnore()) return;
-                const playing = e.data === YT.PlayerState.PLAYING;
-                const paused = e.data === YT.PlayerState.PAUSED;
-                if (playing || paused) onLocalPlayPause(playing);
+    const generation = playerGeneration;
+    setPlayerStatus('Loading YouTube…');
+    return loadYouTubeApi().then(YT => {
+        if (generation !== playerGeneration) return;
+        if (window.tracks) window.tracks.attachYouTube();
+        const mount = document.createElement('div');
+        stageEl().appendChild(mount);
+        const yt = new YT.Player(mount, {
+            height: '100%', width: '100%', videoId,
+            playerVars: { autoplay: 0, controls: 1, rel: 0, modestbranding: 1, playsinline: 1, origin: location.origin },
+            events: {
+                onReady: () => { if (generation !== playerGeneration) return; setPlayerStatus(''); isPlayerReady = true; updatePlayPauseButton(); applyPending(); },
+                onError: event => {
+                    if (generation !== playerGeneration) return;
+                    playerFailed = true;
+                    isPlayerReady = false;
+                    const message = [101, 150].includes(event.data)
+                        ? 'This video cannot be embedded. Try another YouTube video.'
+                        : 'YouTube could not play this video. Check the link or try another video.';
+                    setPlayerStatus(message); showToast(message);
+                },
+                onStateChange: (e) => {
+                    if (generation !== playerGeneration || consumeIgnore()) return;
+                    const playing = e.data === YT.PlayerState.PLAYING;
+                    const paused = e.data === YT.PlayerState.PAUSED;
+                    if (playing || paused) onLocalPlayPause(playing);
+                }
             }
-        }
+        });
+        vp = {
+            getCurrentTime: () => yt.getCurrentTime() || 0,
+            seekTo: (t) => yt.seekTo(t, true),
+            play: () => yt.playVideo(),
+            pause: () => yt.pauseVideo(),
+            destroy: () => yt.destroy()
+        };
+    }).catch(error => {
+        if (generation !== playerGeneration) return;
+        playerFailed = true;
+        setPlayerStatus(error.message || 'YouTube could not load. Try again.');
+        showToast(error.message || 'YouTube could not load. Try again.');
     });
-    vp = {
-        getCurrentTime: () => yt.getCurrentTime() || 0,
-        seekTo: (t) => yt.seekTo(t, true),
-        play: () => yt.playVideo(),
-        pause: () => yt.pauseVideo(),
-        destroy: () => yt.destroy()
-    };
 }
 
 // hls.js is only fetched the first time an HLS (.m3u8) stream is loaded.
 const HLS_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js';
 let hlsJsPromise = null;
 function loadHlsJs() {
+    if (window.Hls) return Promise.resolve(window.Hls);
     if (!hlsJsPromise) {
         hlsJsPromise = new Promise((resolve, reject) => {
             const s = document.createElement('script');
+            const failed = () => {
+                clearTimeout(timer); s.remove(); hlsJsPromise = null;
+                reject(new Error('hls.js failed to load'));
+            };
+            const timer = setTimeout(failed, 15000);
             s.src = HLS_JS_URL;
-            s.onload = () => resolve(window.Hls);
-            s.onerror = () => { hlsJsPromise = null; reject(new Error('hls.js failed to load')); };
+            s.onload = () => { clearTimeout(timer); window.Hls ? resolve(window.Hls) : failed(); };
+            s.onerror = failed;
             document.head.appendChild(s);
         });
     }
@@ -683,6 +742,14 @@ function createDirectPlayer(src) {
             if (!v.isConnected) return;
             if (!Hls || !Hls.isSupported()) { v.src = src; return; }
             hls = new Hls();
+            hls.on(Hls.Events.ERROR, (_event, data) => {
+                if (!data.fatal || !v.isConnected) return;
+                playerFailed = true;
+                clearTimeout(slowTimer);
+                isPlayerReady = false;
+                const message = 'This stream could not load. Check the source link or try another stream.';
+                setPlayerStatus(message); showToast(message);
+            });
             // Listen before loading: the language list can arrive immediately.
             if (window.tracks) window.tracks.attachHls(hls);
             hls.loadSource(src);
@@ -730,6 +797,9 @@ function createDirectPlayer(src) {
         socket.emit('video-seek', { currentTime: v.currentTime });
     });
     v.addEventListener('error', () => {
+        if (!v.isConnected) return;
+        playerFailed = true;
+        isPlayerReady = false;
         clearTimeout(slowTimer);
         setPlayerStatus('⚠️ This stream can\'t play in your browser — pick another one in 🍿 Browse.');
         showToast('This video can\'t play in your browser — try another stream from 🍿 Browse');
@@ -753,7 +823,7 @@ function ensurePlayer(state) {
     const kind = state.kind || 'yt';
     const key = kind === 'direct' ? state.src : state.videoId;
     if (!key) return false;
-    if (!vp || currentSrc !== key) {
+    if (!vp || playerFailed || currentSrc !== key) {
         kind === 'direct' ? createDirectPlayer(state.src) : createYouTubePlayer(state.videoId);
     }
     return true;
@@ -762,6 +832,7 @@ function ensurePlayer(state) {
 
 function wireVideoEvents() {
     socket.on('video-loaded', data => {
+        pendingState = { isPlaying: !!data.isPlaying, currentTime: data.currentTime || 0 };
         ensurePlayer(data);
         setNowPlaying(data.title);
         if (window.tracks && data.kind === 'direct') window.tracks.setContent(data.content);
@@ -815,21 +886,43 @@ function youtubeId(url) {
     return m ? m[1] : null;
 }
 
+// Only close the picker after the room server has accepted the load.
+async function requestVideoLoad(payload) {
+    if (!socket?.connected || !roomJoined) {
+        showToast('The room is reconnecting. Try loading the video again once connected.');
+        return false;
+    }
+    try {
+        const result = await new Promise((resolve, reject) => {
+            socket.timeout(8000).emit('load-video', payload, (error, data) => error
+                ? reject(new Error('The room did not respond. Check your connection and try again.'))
+                : resolve(data));
+        });
+        if (!result?.ok) throw new Error(result?.message || 'Could not load the video. Try again.');
+        return true;
+    } catch (error) {
+        showToast(error.message || 'The room did not respond. Check your connection and try again.');
+        return false;
+    }
+}
+
 // Loads a link from the Browse window's "YouTube" / "Paste link" tabs.
-function loadVideo(inputId) {
+async function loadVideo(inputId) {
     const input = document.getElementById(inputId);
     const url = input.value.trim();
     if (!url) { input.focus(); return; }
     const videoId = youtubeId(url);
+    let payload;
     if (videoId) {
-        socket.emit('load-video', { kind: 'yt', videoId, url });
+        payload = { kind: 'yt', videoId, url };
     } else if (inputId === 'youtubeUrl') {
         showToast('That doesn’t look like a YouTube video link'); return;
-    } else if (/^https?:\/\/\S+\.(mp4|webm|ogg|ogv|m4v|mov|m3u8)(\?\S*)?$/i.test(url)) {
-        socket.emit('load-video', { kind: 'direct', src: url });
+    } else if (/^https?:\/\/\S+$/i.test(url)) {
+        payload = { kind: 'direct', src: url };
     } else {
         showToast('Paste a direct video link (.mp4, .webm, .mov or .m3u8)'); return;
     }
+    if (!await requestVideoLoad(payload)) return;
     input.value = '';
     document.getElementById('browseModal').classList.remove('show');
 }
@@ -919,11 +1012,19 @@ function markActive() {
     if (theater) idleTimer = setTimeout(() => appEl.classList.add('idle'), 3000);
 }
 
+function updateRoomShare() {
+    document.getElementById('roomCode').textContent = roomCode;
+    document.getElementById('roomShare').hidden = !roomCode || theater ||
+        !!(document.fullscreenElement || document.webkitFullscreenElement) ||
+        matchMedia('(display-mode: fullscreen)').matches;
+}
+
 function setTheater(on) {
     if (on === theater) return;
     theater = on;
     theaterChat = false;
     appEl.classList.toggle('theater', on);
+    updateRoomShare();
     const btn = document.getElementById('fullscreenBtn');
     btn.setAttribute('aria-pressed', String(on));
     if (on) {
@@ -956,9 +1057,11 @@ function wireTheater() {
     // Leaving real full screen (Esc, system gesture) also leaves the layout.
     const onFsChange = () => {
         if (theater && !(document.fullscreenElement || document.webkitFullscreenElement)) setTheater(false);
+        updateRoomShare();
     };
     document.addEventListener('fullscreenchange', onFsChange);
     document.addEventListener('webkitfullscreenchange', onFsChange);
+    matchMedia('(display-mode: fullscreen)').addEventListener('change', updateRoomShare);
     ['pointermove', 'pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, () => { if (theater) markActive(); }, { passive: true }));
 }
 

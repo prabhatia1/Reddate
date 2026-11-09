@@ -749,6 +749,9 @@
         .shell.theater .now-playing,
         .shell.theater .player-status,
         .shell.theater .video-controls { display: none; }
+        :fullscreen .room-share { display: none !important; }
+        :-webkit-full-screen .room-share { display: none !important; }
+        @media (display-mode: fullscreen) { .room-share { display: none !important; } }
         .shell.theater .stage, .shell.theater .post, .shell.theater .player-wrap { padding: 0; height: 100%; max-width: none; }
         .shell.theater #videoPlayer {
             width: 100%; height: 100dvh; max-height: none; aspect-ratio: auto; border-radius: 0;
@@ -1171,7 +1174,6 @@
     </section>
     <div id="voiceAudio" hidden></div>
 
-    <script src="https://www.youtube.com/iframe_api"></script>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/mkv.js"></script>
     <script src="/badges.js"></script>

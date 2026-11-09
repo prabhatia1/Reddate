@@ -39,7 +39,12 @@ const io = new Server(server, {
 // Render (and most hosts) put one proxy in front; trust it so req.ip is the
 // real client for per-IP rate limits.
 app.set('trust proxy', 1);
-app.use(express.static('public'));
+// Resolve assets from this checkout even when Node is started from another folder.
+app.use(express.static(path.join(__dirname, 'public'), {
+    setHeaders(res, file) {
+        if (/\.(html|js|css)$/.test(file)) res.set('Cache-Control', 'no-store');
+    }
+}));
 require('./media-audio').registerMediaAudio(app);
 
 // The two public sites share the TV service for new parties. A self-hosted
@@ -52,7 +57,7 @@ app.get('/party-config', (req, res) => {
     } catch (_) { origin = ''; }
     res.set('Cache-Control', 'no-store').json({ origin });
 });
-app.get(['/join/:code', '/join'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get(['/join/:code', '/join'], (_req, res) => res.set('Cache-Control', 'no-store').sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // ---- Anonymous usage stats (stats.js) ----
 // The page pings once per load (Render's health checks would inflate a
@@ -397,12 +402,14 @@ io.on('connection', (socket) => {
     });
 
     // ---- Video sync ----
-    socket.on('load-video', (videoData = {}) => {
+    socket.on('load-video', (videoData = {}, ack) => {
+        const reply = result => { if (typeof ack === 'function') ack(result); };
         const roomId = socket.data.roomId;
-        if (!roomId) return;
+        if (!roomId) return reply({ ok: false, message: 'Reconnect to the room before loading a video.' });
         const kind = videoData.kind === 'direct' ? 'direct' : 'yt';
         const src = typeof videoData.src === 'string' ? videoData.src : '';
-        if (kind === 'direct' && (!/^https?:\/\//i.test(src) || src.length > MAX_STREAM_URL)) return;
+        if (kind === 'direct' && (!/^https?:\/\//i.test(src) || src.length > MAX_STREAM_URL)) return reply({ ok: false, message: 'Enter a valid video URL.' });
+        if (kind === 'yt' && !/^[\w-]{11}$/.test(videoData.videoId || '')) return reply({ ok: false, message: 'Enter a valid YouTube video link.' });
         const title = typeof videoData.title === 'string' ? videoData.title.slice(0, MAX_TITLE) : '';
         const room = getRoom(roomId);
         room.videoState = {
@@ -419,6 +426,7 @@ io.on('connection', (socket) => {
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
         room.watchEpoch++;
         io.to(roomId).emit('video-loaded', { ...room.videoState, user: socket.data.username });
+        reply({ ok: true });
     });
 
     // ---- Room addons (opaque E2E-encrypted blob; server can't read it) ----
