@@ -94,19 +94,22 @@ How it fits together:
 
 ### Subtitles & audio tracks
 
-Subtitles are shared by the room; audio language is chosen separately on each device.
+New viewers start with the room's current audio and subtitle settings. Each viewer
+can then change audio, turn subtitles off, or adjust subtitle timing for their own device.
+The person who loaded the video supplies the room's starting settings.
 
 - **💬 Subtitles** — for titles picked from Browse, subtitles come from the
   built-in OpenSubtitles v3 addon plus any room addon that offers subtitles.
   Pick a language and a file (ones matching the stream's release are ranked
   first, early CAM/TS rips last), nudge timing ±0.5s if they drift, or load
   your own `.srt`/`.vtt` file (up to 5 MB) for any video. Selecting a subtitle,
-  turning it off, or changing its timing applies to everyone, including people
+  turning it off, or changing its timing updates your player. The room controller's
+  choices also apply to viewers who have not made a personal choice and to people
   who join later. Subtitle data is encrypted with the room key and held in memory
   until the video changes or the room closes. Your last language helps sort the picker.
 - **🔊 Language** — open the Language button below the video, or the audio
   icon in full-screen mode, to switch audio while watching (e.g. Hindi / English).
-  Your choice applies only to you, keeps the playback position, and is remembered
+  Guests' choices apply only to their own device, keep the playback position, and are remembered
   for the next video when that language is available. The list updates as tracks
   load. Switching requires audio tracks supplied by the source. Native and HLS
   players switch tracks directly. For embedded tracks in MP4/MKV files that the

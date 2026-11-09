@@ -38,12 +38,27 @@ test('late join receives live position and encrypted subtitles; slow progress ca
     cryptoContext.key = key; cryptoContext.text = JSON.stringify(state);
     const payload = await vm.runInContext('encryptText(key, text)', cryptoContext);
     assert.equal((await ack(host, 'set-subtitles', { ...payload, mediaId: movie.mediaId })).ok, true);
+    const audio = { language: 'hi', label: 'Hindi', index: 1 };
+    cryptoContext.text = JSON.stringify(audio);
+    const audioPayload = await vm.runInContext('encryptText(key, text)', cryptoContext);
+    assert.equal((await ack(host, 'set-audio', { ...audioPayload, mediaId: movie.mediaId })).ok, true);
     await new Promise(resolve => setTimeout(resolve, 160));
     const guest = await connect(); const snapshot = event(guest, 'video-sync'); const sub = event(guest, 'subtitles-updated');
+    const initialAudio = event(guest, 'audio-updated');
     await ack(guest, 'join-room', { roomId, username: 'Guest' });
     const live = await snapshot;
     assert.equal(live.src, 'https://example.com/movie.mp4'); assert.equal(live.isPlaying, true); assert.ok(live.currentTime > 80.1);
     cryptoContext.payload = await sub;
+    assert.deepEqual(JSON.parse(await vm.runInContext('decryptText(key, payload)', cryptoContext)), state);
+    cryptoContext.payload = await initialAudio;
+    assert.deepEqual(JSON.parse(await vm.runInContext('decryptText(key, payload)', cryptoContext)), audio);
+    assert.equal((await ack(guest, 'set-subtitles', { ...audioPayload, mediaId: movie.mediaId })).personal, true);
+    assert.equal((await ack(guest, 'set-audio', { ...payload, mediaId: movie.mediaId })).personal, true);
+    const newcomer = await connect(); const nextAudio = event(newcomer, 'audio-updated'), nextSub = event(newcomer, 'subtitles-updated');
+    await ack(newcomer, 'join-room', { roomId, username: 'Next guest' });
+    cryptoContext.payload = await nextAudio;
+    assert.deepEqual(JSON.parse(await vm.runInContext('decryptText(key, payload)', cryptoContext)), audio);
+    cryptoContext.payload = await nextSub;
     assert.deepEqual(JSON.parse(await vm.runInContext('decryptText(key, payload)', cryptoContext)), state);
     guest.emit('video-progress', { currentTime: 0 });
     const projected = event(host, 'video-sync'); host.emit('sync-request', {});
@@ -92,9 +107,9 @@ test('shared subtitle file, timing and Off replay on player replacement without 
     const document = { readyState: 'loading', addEventListener() {}, getElementById: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element };
     const shared = [];
     const context = vm.createContext({ window: {}, document, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} }, Blob, TextEncoder, TextDecoder, localStorage: { getItem: () => 'off', setItem() {} }, fetch: async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode('WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHi').buffer }) });
-    const source = fs.readFileSync(path.join(root, 'public/tracks.js'), 'utf8').replace('configureRoom(onChange)', '_pick: applySubtitle, _render: renderSubs, configureRoom(onChange)');
+    const source = fs.readFileSync(path.join(root, 'public/tracks.js'), 'utf8').replace('configureRoom(onChange, onAudio)', '_audio: selectAudio, _pick: applySubtitle, _render: renderSubs, configureRoom(onChange, onAudio)');
     vm.runInContext(source, context);
-    const tracks = context.window.tracks; tracks.configureRoom(s => shared.push(s)); tracks.setMedia('first');
+    const tracks = context.window.tracks; tracks.configureRoom(s => shared.push(s)); tracks.setMedia('first'); tracks.setSettingsOwner(true);
     let attached; const video = { ...element(), appendChild: t => { attached = t; } };
     tracks.attach(video); await tracks._pick({ url: 'https://example.com/en.vtt', lang: 'eng' });
     assert.equal(shared.length, 1); assert.ok(shared[0].state.vtt.startsWith('WEBVTT'));
@@ -102,4 +117,28 @@ test('shared subtitle file, timing and Off replay on player replacement without 
     tracks.detach(); tracks.attach(video); assert.equal(attached.track.cues[0].startTime, 3);
     tracks.applyShared({ vtt: null, offset: 0 }); assert.equal(shared.length, 1);
     tracks.setMedia('second'); tracks.detach(); attached = null; tracks.attach(video); assert.equal(attached, null);
+});
+
+
+test('new viewers inherit delayed audio tracks and can keep personal audio and subtitles', async () => {
+    const elements = new Map();
+    const element = () => ({ children: [], style: {}, classList: { contains: () => false, toggle() {}, remove() {} }, setAttribute() {}, addEventListener() {}, removeEventListener() {}, remove() { this.removed = true; }, track: { cues: [{ startTime: 1, endTime: 3 }] }, appendChild(e) { this.children.push(e); }, append(...nodes) { this.children.push(...nodes); } });
+    const document = { readyState: 'loading', addEventListener() {}, getElementById: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, createElementNS: element, createTextNode: text => ({ textContent: text }) };
+    const shared = [], audio = []; const handlers = {}; let appends = 0;
+    const context = vm.createContext({ window: {}, document, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} }, Blob, TextEncoder, TextDecoder, localStorage: { getItem: () => 'off', setItem() {}, removeItem() {} } });
+    const source = fs.readFileSync(path.join(root, 'public/tracks.js'), 'utf8').replace('configureRoom(onChange, onAudio)', '_audio: selectAudio, _render: renderSubs, configureRoom(onChange, onAudio)');
+    vm.runInContext(source, context); const tracks = context.window.tracks;
+    tracks.configureRoom(s => shared.push(s), s => audio.push(s)); tracks.setMedia('movie'); tracks.setSettingsOwner(false);
+    const video = { ...element(), audioTracks: [], addEventListener: (name, fn) => { (handlers[name] ||= []).push(fn); }, appendChild: () => { appends++; } };
+    tracks.attach(video); tracks.applyRoomAudio({ language: 'hi', label: 'Hindi', index: 1 });
+    video.audioTracks.push({ language: 'en', label: 'English', enabled: true }, { language: 'hi', label: 'Hindi', enabled: false });
+    handlers.loadedmetadata.forEach(fn => fn()); assert.equal(video.audioTracks[1].enabled, true);
+    await tracks._audio(0); assert.equal(video.audioTracks[0].enabled, true);
+    tracks.applyRoomAudio({ language: 'hi', label: 'Hindi', index: 1 }); assert.equal(video.audioTracks[0].enabled, true); assert.equal(audio.length, 0);
+    const state = { vtt: 'WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello', key: 'room', label: 'English', lang: 'eng', offset: 0 };
+    tracks.applyShared(state); assert.equal(appends, 1);
+    const panel = element(); tracks._render(panel); panel.children.find(e => e.children?.some(c => c.textContent === 'Off'))?.children.find(c => c.textContent === 'Off').onclick();
+    const off = panel.children.flatMap(e => e.children || []).find(e => e.textContent === 'Off'); assert.ok(off);
+    tracks.applyShared({ ...state, offset: 2 }); assert.equal(appends, 1); assert.equal(shared.length, 0);
+    tracks.setMedia('next movie'); tracks.applyShared(state); assert.equal(appends, 2);
 });

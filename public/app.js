@@ -74,6 +74,8 @@ let roomPlayback = null;
 let autoplayBlocked = false;
 let currentMediaId = null;
 let subtitleRevision = 0;
+let audioRevision = 0;
+let settingsOwnerId = null;
 let typingTimer = null;
 
 // Generic trigger words -> reaction emoji. Detected client-side on decrypted
@@ -303,6 +305,7 @@ function startApp() {
 
     socket.on('joined', data => {
         roomJoined = true;
+        window.tracks?.reportAudio(true);
         roomCode = data.code || roomCode;
         updateRoomShare();
         addSystemMessage('🔒 Connected securely. Share the room code or invite link to bring someone in.');
@@ -854,15 +857,6 @@ function ensurePlayer(state) {
 function wireVideoEvents() {
     let subtitleSendQueue = Promise.resolve();
     let subtitleReceiveQueue = Promise.resolve();
-    window.tracks?.configureRoom(({ mediaId, state }) => {
-        subtitleSendQueue = subtitleSendQueue.then(async () => {
-            if (!roomJoined || mediaId !== currentMediaId) throw new Error('Reconnect to the room before changing subtitles.');
-            const payload = await encryptText(roomKey, JSON.stringify(state));
-            if (mediaId !== currentMediaId) return;
-            const result = await new Promise((resolve, reject) => socket.timeout(10000).emit('set-subtitles', { ...payload, mediaId }, (error, data) => error ? reject(new Error('The subtitle could not be shared. Try again.')) : resolve(data)));
-            if (!result?.ok) throw new Error(result?.message || 'The subtitle could not be shared.');
-        }).catch(error => showToast(error.message));
-    });
     socket.on('subtitles-updated', payload => {
         subtitleReceiveQueue = subtitleReceiveQueue.then(async () => {
             if (payload.mediaId !== currentMediaId || payload.revision <= subtitleRevision) return;
@@ -872,12 +866,49 @@ function wireVideoEvents() {
             window.tracks?.applyShared(state, payload.sender === socket.id);
         }).catch(() => showToast('The room subtitle could not be decrypted. Check your invite link.'));
     });
+    let audioSendQueue = Promise.resolve();
+    let audioReceiveQueue = Promise.resolve();
+    const sendAudio = ({ mediaId, state }) => {
+        audioSendQueue = audioSendQueue.then(async () => {
+            if (!roomJoined || mediaId !== currentMediaId || settingsOwnerId !== socket.id) return;
+            const payload = await encryptText(roomKey, JSON.stringify(state));
+            if (mediaId !== currentMediaId) return;
+            const result = await new Promise((resolve, reject) => socket.timeout(8000).emit('set-audio', { ...payload, mediaId }, (error, data) => error ? reject(error) : resolve(data)));
+            if (!result?.ok) throw new Error('Could not share the starting audio language.');
+        }).catch(() => showToast('Could not share the starting audio language. Try selecting it again.'));
+    };
+    window.tracks?.configureRoom(({ mediaId, state }) => {
+        subtitleSendQueue = subtitleSendQueue.then(async () => {
+            if (!roomJoined || mediaId !== currentMediaId || settingsOwnerId !== socket.id) return;
+            const payload = await encryptText(roomKey, JSON.stringify(state));
+            if (mediaId !== currentMediaId) return;
+            const result = await new Promise((resolve, reject) => socket.timeout(10000).emit('set-subtitles', { ...payload, mediaId }, (error, data) => error ? reject(error) : resolve(data)));
+            if (!result?.ok) throw new Error('The subtitle could not be shared.');
+        }).catch(error => showToast(error.message));
+    }, sendAudio);
+    socket.on('audio-updated', payload => {
+        audioReceiveQueue = audioReceiveQueue.then(async () => {
+            if (payload.mediaId !== currentMediaId || payload.revision <= audioRevision) return;
+            const state = JSON.parse(await decryptText(roomKey, payload));
+            if (payload.mediaId !== currentMediaId) return;
+            audioRevision = payload.revision;
+            window.tracks?.applyRoomAudio(state);
+        }).catch(() => showToast('The room audio setting could not be decrypted.'));
+    });
+    socket.on('room-settings-owner', data => {
+        if (data.mediaId !== currentMediaId) return;
+        settingsOwnerId = data.settingsOwner;
+        window.tracks?.setSettingsOwner(settingsOwnerId === socket.id);
+    });
     const setMedia = data => {
         if (data.mediaId !== currentMediaId) {
             currentMediaId = data.mediaId;
             subtitleRevision = 0;
-            window.tracks?.setMedia(currentMediaId);
+            audioRevision = 0;
+            window.tracks?.setMedia(currentMediaId, data.src);
         }
+        settingsOwnerId = data.settingsOwner;
+        window.tracks?.setSettingsOwner(settingsOwnerId === socket.id);
     };
     socket.on('video-loaded', data => {
         setMedia(data);

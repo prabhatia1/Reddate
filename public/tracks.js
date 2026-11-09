@@ -45,15 +45,44 @@ window.tracks = (function () {
     let sharedSubtitle = null;
     let currentVtt = null;
     let onSubtitleChange = null;
+    let onAudioChange = null;
+    let settingsOwner = false;
+    let subtitlePersonal = false;
+    let audioPersonal = false;
+    let roomAudio = null;
+    let reportedAudio = '';
+    let audioMediaId = null;
+    let attachedSource = '';
+
+    function reportAudio(force = false) {
+        if (force) reportedAudio = '';
+        if (!settingsOwner || !mediaId || audioMediaId !== mediaId || !onAudioChange || pendingAudio || fallback?.pending) return;
+        const opts = audioOptions();
+        const index = opts.findIndex(o => o.enabled);
+        if (index < 0) return;
+        const state = { language: opts[index].language || '', label: opts[index].label || '', index };
+        const signature = JSON.stringify(state);
+        if (signature === reportedAudio) return;
+        reportedAudio = signature;
+        onAudioChange({ mediaId, state });
+    }
+
+    function applyRoomAudio(state) {
+        if (!state || typeof state.language !== 'string') return;
+        roomAudio = state;
+        refreshAudioOptions();
+    }
     const MAX_SUB_BYTES = 5 * 1024 * 1024;
 
     function publishSubtitle() {
         const state = { vtt: currentVtt, key: activeSubUrl, lang: activeLang, label: activeLabel, offset };
         sharedSubtitle = state;
-        if (onSubtitleChange && mediaId) onSubtitleChange({ mediaId, state });
+        subtitlePersonal = !settingsOwner;
+        if (onSubtitleChange && mediaId && settingsOwner) onSubtitleChange({ mediaId, state });
     }
 
-    function applySharedSubtitle(state, preserveSelection = false) {
+    function applySharedSubtitle(state, preserveSelection = false, force = false) {
+        if (subtitlePersonal && !settingsOwner && !force) return;
         if (!state || (state.vtt !== null && typeof state.vtt !== 'string')) return;
         if (state.vtt && new TextEncoder().encode(state.vtt).length > MAX_SUB_BYTES) return;
         if (!preserveSelection) subtitleSelectionId++;
@@ -183,6 +212,7 @@ window.tracks = (function () {
 
     async function applySubtitle(sub) {
         if (!video) return;
+        subtitlePersonal = !settingsOwner;
         const selection = ++subtitleSelectionId;
         const forVideo = video;
         setPanelStatus('Loading subtitle…');
@@ -205,6 +235,7 @@ window.tracks = (function () {
 
     function loadSubtitleFile(file) {
         if (!file || !video) return;
+        subtitlePersonal = !settingsOwner;
         if (file.size > 5 * 1024 * 1024) { toast('Subtitle file too large (max 5 MB)'); return; }
         const reader = new FileReader();
         const selection = ++subtitleSelectionId;
@@ -287,6 +318,7 @@ window.tracks = (function () {
     }
 
     async function selectAudio(index, remember = true) {
+        if (remember) audioPersonal = true;
         const opt = audioOptions()[index];
         if (!opt) return;
         const selectionId = ++audioSelectionId;
@@ -314,12 +346,26 @@ window.tracks = (function () {
             pendingAudio = null;
             audioStatus = 'Could not switch audio. Try another language or stream.';
         }
+        reportAudio();
         renderPanel();
     }
 
     function refreshAudioOptions() {
+        // New viewers inherit the room selection before their saved language.
+        if (roomAudio && !audioPersonal && !pendingAudio && !(fallback && (fallback.pending || !fallback.canAutoSelect))) {
+            const opts = audioOptions();
+            const language = audioLanguage(roomAudio.language);
+            let index = opts.findIndex(o => o.language === language && o.label === roomAudio.label);
+            if (index < 0 && language) index = opts.findIndex(o => o.language === language);
+            if (index < 0 && language) index = opts.findIndex(o => o.language && o.language.split('-')[0] === language.split('-')[0]);
+            if (index < 0 && !language && Number.isInteger(roomAudio.index) && opts[roomAudio.index]) index = roomAudio.index;
+            if (index >= 0) {
+                audioSelected = true;
+                if (!opts[index].enabled) selectAudio(index, false);
+            }
+        }
         // Track lists may arrive after loadedmetadata, or change with an HLS group.
-        if (!audioSelected && !pendingAudio && !(fallback && (fallback.pending || !fallback.canAutoSelect))) {
+        if ((!roomAudio || audioPersonal) && !audioSelected && !pendingAudio && !(fallback && (fallback.pending || !fallback.canAutoSelect))) {
             let pref = '';
             try { pref = audioLanguage(localStorage.getItem(AUDIO_PREF_KEY)); } catch (_) {}
             if (pref) {
@@ -329,6 +375,7 @@ window.tracks = (function () {
                 if (index >= 0 && !opts[index].enabled) selectAudio(index, false);
             }
         }
+        reportAudio();
         renderPanel();
     }
 
@@ -470,7 +517,7 @@ window.tracks = (function () {
         const title = el('h2', null, 'Subtitles');
         title.id = 'trackModalTitle';
         b.appendChild(title);
-        b.appendChild(el('div', 'addon-help', 'Subtitle and timing changes apply to everyone in this room.'));
+        b.appendChild(el('div', 'addon-help', 'Start with the room subtitles. Your personal changes take priority.'));
 
         // What's showing right now.
         const now = el('div', `sub-now ${activeSubUrl ? 'on' : ''}`);
@@ -575,10 +622,27 @@ window.tracks = (function () {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire); else wire();
 
     return {
-        configureRoom(onChange) { onSubtitleChange = onChange; },
-        setMedia(id) {
+        configureRoom(onChange, onAudio) { onSubtitleChange = onChange; onAudioChange = onAudio; },
+        setSettingsOwner(owns) {
+            const becameOwner = !!owns && !settingsOwner;
+            settingsOwner = !!owns;
+            if (becameOwner && subtitlePersonal && sharedSubtitle && onSubtitleChange) {
+                subtitlePersonal = false;
+                onSubtitleChange({ mediaId, state: sharedSubtitle });
+            }
+            reportAudio();
+        },
+        applyRoomAudio,
+        reportAudio,
+        makeSubtitlePersonal() { subtitlePersonal = !settingsOwner; },
+        setMedia(id, source) {
             if (id === mediaId) return;
             mediaId = id;
+            audioMediaId = video && source && source === attachedSource ? id : null;
+            subtitlePersonal = false;
+            audioPersonal = false;
+            roomAudio = null;
+            reportedAudio = '';
             subtitleSelectionId++;
             sharedSubtitle = null;
             clearSubtitle();
@@ -588,6 +652,8 @@ window.tracks = (function () {
         attach(v, src) {
             clearAudioListeners();
             video = v;
+            attachedSource = src || '';
+            audioMediaId = mediaId;
             playerKind = 'direct';
             hls = null;
             trackEl = null;
@@ -605,13 +671,13 @@ window.tracks = (function () {
             }
             if (v.audioTracks && v.audioTracks.addEventListener) {
                 ['addtrack', 'removetrack'].forEach(ev => listen(v.audioTracks, ev, refreshAudioOptions));
-                listen(v.audioTracks, 'change', renderPanel);
+                listen(v.audioTracks, 'change', refreshAudioOptions);
             }
             listen(v, 'loadedmetadata', refreshAudioOptions);
             if (fallback) listen(v, 'loadedmetadata', () => fallback?.load());
             listen(v, 'error', renderPanel);
             refreshAudioOptions();
-            if (sharedSubtitle) applySharedSubtitle(sharedSubtitle);
+            if (sharedSubtitle) applySharedSubtitle(sharedSubtitle, true, true);
         },
         attachHls(h) {
             hls = h;
@@ -627,6 +693,7 @@ window.tracks = (function () {
                         audioStatus = `Selected ${pendingAudio.label}.`;
                         pendingAudio = null;
                     }
+                    reportAudio();
                     renderPanel();
                 });
                 on(window.Hls.Events.ERROR, (_event, data) => {
@@ -658,6 +725,8 @@ window.tracks = (function () {
             clearAudioListeners();
             if (blobUrl) URL.revokeObjectURL(blobUrl);
             video = null;
+            audioMediaId = null;
+            attachedSource = '';
             hls = null;
             playerKind = null;
             trackEl = null;

@@ -264,6 +264,8 @@ function getRoom(roomId) {
             // server stores and relays an opaque blob it cannot read.
             addons: null,
             subtitles: null, // opaque room-key ciphertext, scoped to the loaded video
+            audio: null, // starting audio selection, encrypted with the same room key
+            audioRevision: 0,
             subtitleRevision: 0,
             watchEpoch: 0,
             // Voice room: socket id -> { username, muted, cam }. Audio/video go
@@ -333,6 +335,10 @@ function leaveRoom(socket) {
     const room = rooms.get(roomId);
     if (room) {
         room.users.delete(socket.id);
+        if (room.videoState.settingsOwner === socket.id && room.users.size) {
+            room.videoState.settingsOwner = room.users.keys().next().value;
+            io.to(roomId).emit('room-settings-owner', { mediaId: room.videoState.mediaId, settingsOwner: room.videoState.settingsOwner });
+        }
         room.pollVotes.delete(socket.id);
         leaveVoice(socket, room, roomId);
         socket.to(roomId).emit('system-message', {
@@ -383,6 +389,7 @@ io.on('connection', (socket) => {
         // Bring the newcomer up to speed with the current video state.
         if (room.videoState.videoId || room.videoState.src) socket.emit('video-sync', stateNow(room));
         if (room.subtitles) socket.emit('subtitles-updated', room.subtitles);
+        if (room.audio) socket.emit('audio-updated', room.audio);
         if (room.addons) socket.emit('addons-updated', { ...room.addons, user: null });
         if (room.voice.size) socket.emit('voice-members', [...room.voice].map(([id, m]) => ({ id, ...m })));
         broadcastUserCount(roomId);
@@ -427,6 +434,7 @@ io.on('connection', (socket) => {
         const room = getRoom(roomId);
         room.videoState = {
             mediaId: crypto.randomBytes(12).toString('hex'),
+            settingsOwner: socket.id,
             videoId: kind === 'yt' ? String(videoData.videoId || '') : '',
             src: kind === 'direct' ? src : '',
             kind,
@@ -437,6 +445,8 @@ io.on('connection', (socket) => {
             lastUpdate: Date.now()
         };
         room.subtitles = null;
+        room.audio = null;
+        room.audioRevision = 0;
         room.subtitleRevision = 0;
         // Which kind of video was started (counts only — never the title or link).
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
@@ -449,9 +459,21 @@ io.on('connection', (socket) => {
         const reply = result => { if (typeof ack === 'function') ack(result); };
         const room = rooms.get(socket.data.roomId);
         if (!room || !room.videoState.mediaId || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false, message: 'The video changed. Pick the subtitle again.' });
+        if (room.videoState.settingsOwner !== socket.id) return reply({ ok: true, personal: true });
         if (typeof payload.iv !== 'string' || payload.iv.length > 32 || typeof payload.ciphertext !== 'string' || payload.ciphertext.length > MAX_SUBTITLE_CIPHER) return reply({ ok: false, message: 'Subtitle data is too large.' });
         room.subtitles = { mediaId: payload.mediaId, iv: payload.iv, ciphertext: payload.ciphertext, revision: ++room.subtitleRevision, sender: socket.id };
         io.to(socket.data.roomId).emit('subtitles-updated', room.subtitles);
+        reply({ ok: true });
+    });
+
+    socket.on('set-audio', (payload = {}, ack) => {
+        const reply = result => { if (typeof ack === 'function') ack(result); };
+        const room = rooms.get(socket.data.roomId);
+        if (!room || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false });
+        if (room.videoState.settingsOwner !== socket.id) return reply({ ok: true, personal: true });
+        if (typeof payload.iv !== 'string' || payload.iv.length > 32 || typeof payload.ciphertext !== 'string' || payload.ciphertext.length > 16384) return reply({ ok: false });
+        room.audio = { mediaId: payload.mediaId, iv: payload.iv, ciphertext: payload.ciphertext, revision: ++room.audioRevision };
+        io.to(socket.data.roomId).emit('audio-updated', room.audio);
         reply({ ok: true });
     });
 
