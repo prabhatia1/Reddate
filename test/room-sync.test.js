@@ -31,11 +31,20 @@ test('TV late join gets live video, subtitles, offset and Off; stale selections 
     host.emit('video-playpause', { currentTime: 70, isPlaying: true });
     const state = { vtt: 'WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello', key: 'file:movie.vtt', lang: 'eng', label: 'English', offset: 1.5 };
     assert.equal((await ack(host, 'set-subtitles', { mediaId: movie.mediaId, state })).ok, true);
+    const audio = { language: 'hi', label: 'Hindi', index: 1 };
+    assert.equal((await ack(host, 'set-audio', { mediaId: movie.mediaId, state: audio })).ok, true);
     await new Promise(resolve => setTimeout(resolve, 150));
     const guest = await connect(); joined = event(guest, 'joined'); const snapshot = event(guest, 'video-sync'); const replay = event(guest, 'subtitles-updated');
+    const firstAudio = event(guest, 'audio-updated');
     guest.emit('join-room', { roomId, username: 'Guest' }); await joined;
     const live = await snapshot; assert.equal(live.src, 'https://example.com/movie.mp4'); assert.equal(live.isPlaying, true); assert.ok(live.currentTime > 70.1);
     assert.deepEqual((await replay).state, { ...state, embeddedLang: '' });
+    assert.deepEqual((await firstAudio).state, audio);
+    assert.equal((await ack(guest, 'set-subtitles', { mediaId: movie.mediaId, state: { vtt: null, offset: 0 } })).personal, true);
+    assert.equal((await ack(guest, 'set-audio', { mediaId: movie.mediaId, state: { language: 'en', label: 'English', index: 0 } })).personal, true);
+    const newcomer = await connect(); const nextAudio = event(newcomer, 'audio-updated'), nextSub = event(newcomer, 'subtitles-updated'); joined = event(newcomer, 'joined');
+    newcomer.emit('join-room', { roomId, username: 'Next guest' }); await joined;
+    assert.deepEqual((await nextAudio).state, audio); assert.deepEqual((await nextSub).state, { ...state, embeddedLang: '' });
     for (const next of [{ ...state, offset: -1.5 }, { vtt: null, key: '', lang: 'off', label: '', offset: 0 }, { vtt: null, key: '', lang: 'hin', label: 'Hindi', embeddedLang: 'hin', offset: 0 }]) {
         const changed = event(guest, 'subtitles-updated');
         assert.equal((await ack(host, 'set-subtitles', { mediaId: movie.mediaId, state: next })).ok, true);
@@ -67,7 +76,7 @@ test('TV web subtitle picker shares exact files and delay, ignores stale downloa
     const source = fs.readFileSync(path.join(root, 'web/src/screens/Player.tsx'), 'utf8');
     const pending = new Map(), sent = [], rendered = {}; let sharedEffect;
     const context = vm.createContext({ TextDecoder, TextEncoder, Number, Math, Array, String,
-        subSelection: { current: 0 }, selectedSub: { current: {} }, sharedSubRevision: { current: '' },
+        subtitlePersonal: { current: false }, subSelection: { current: 0 }, selectedSub: { current: {} }, sharedSubRevision: { current: '' },
         info: {}, vref: { current: {} }, hls: { current: null }, Hls: { Events: {} }, MAX_SUB_BYTES: 3000000,
         setCues: c => { rendered.cues = c; }, setSubLabel: l => { rendered.label = l; }, setSubUrl: u => { rendered.url = u; }, setSubDelay: d => { rendered.delay = d; },
         send: e => sent.push(e), toast: message => { throw new Error(message); }, useEffect: fn => { sharedEffect = fn; },
@@ -84,7 +93,10 @@ test('TV web subtitle picker shares exact files and delay, ignores stale downloa
     assert.equal(rendered.url, 'latest'); assert.equal(sent.filter(e => e.type === 'subtitle').length, 1);
     vm.runInContext('changeSubDelay(1.25)', context); assert.equal(sent.at(-1).state.offset, 1.25);
     context.info = { roomSubtitle: { mediaId: 'movie', revision: 2, state: { vtt: null, lang: 'off', offset: 0 }, own: false } };
-    const before = sent.length; sharedEffect(); assert.equal(sent.length, before); assert.equal(rendered.cues.length, 0); assert.equal(rendered.delay, 0);
+    context.subtitlePersonal.current = false; const before = sent.length; sharedEffect(); assert.equal(sent.length, before); assert.equal(rendered.cues.length, 0); assert.equal(rendered.delay, 0);
+    context.subtitlePersonal.current = true; rendered.url = 'personal';
+    context.info = { roomSubtitle: { mediaId: 'movie', revision: 3, state: { vtt: text, key: 'host', offset: 2 }, own: false } };
+    sharedEffect(); assert.equal(rendered.url, 'personal'); assert.equal(sent.length, before);
 });
 
 test('shared subtitle file, timing and Off replay on player replacement without echo', async () => {
@@ -93,9 +105,9 @@ test('shared subtitle file, timing and Off replay on player replacement without 
     const document = { readyState: 'loading', addEventListener() {}, getElementById: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element };
     const shared = [];
     const context = vm.createContext({ window: {}, document, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} }, Blob, TextEncoder, TextDecoder, localStorage: { getItem: () => 'off', setItem() {} }, fetch: async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode('WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHi').buffer }) });
-    const source = fs.readFileSync(path.join(root, 'public/tracks.js'), 'utf8').replace('configureRoom(onChange)', '_pick: applySubtitle, _render: renderSubs, configureRoom(onChange)');
+    const source = fs.readFileSync(path.join(root, 'public/tracks.js'), 'utf8').replace('configureRoom(onChange, onAudio)', '_audio: selectAudio, _pick: applySubtitle, _render: renderSubs, configureRoom(onChange, onAudio)');
     vm.runInContext(source, context);
-    const tracks = context.window.tracks; tracks.configureRoom(s => shared.push(s)); tracks.setMedia('first');
+    const tracks = context.window.tracks; tracks.configureRoom(s => shared.push(s)); tracks.setMedia('first'); tracks.setSettingsOwner(true);
     let attached; const video = { ...element(), appendChild: t => { attached = t; } };
     tracks.attach(video); await tracks._pick({ url: 'https://example.com/en.vtt', lang: 'eng' });
     assert.equal(shared.length, 1); assert.ok(shared[0].state.vtt.startsWith('WEBVTT'));
@@ -103,4 +115,28 @@ test('shared subtitle file, timing and Off replay on player replacement without 
     tracks.detach(); tracks.attach(video); assert.equal(attached.track.cues[0].startTime, 3);
     tracks.applyShared({ vtt: null, offset: 0 }); assert.equal(shared.length, 1);
     tracks.setMedia('second'); tracks.detach(); attached = null; tracks.attach(video); assert.equal(attached, null);
+});
+
+
+test('new viewers inherit delayed audio tracks and can keep personal audio and subtitles', async () => {
+    const elements = new Map();
+    const element = () => ({ children: [], style: {}, classList: { contains: () => false, toggle() {}, remove() {} }, setAttribute() {}, addEventListener() {}, removeEventListener() {}, remove() { this.removed = true; }, track: { cues: [{ startTime: 1, endTime: 3 }] }, appendChild(e) { this.children.push(e); }, append(...nodes) { this.children.push(...nodes); } });
+    const document = { readyState: 'loading', addEventListener() {}, getElementById: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, createElementNS: element, createTextNode: text => ({ textContent: text }) };
+    const shared = [], audio = []; const handlers = {}; let appends = 0;
+    const context = vm.createContext({ window: {}, document, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} }, Blob, TextEncoder, TextDecoder, localStorage: { getItem: () => 'off', setItem() {}, removeItem() {} } });
+    const source = fs.readFileSync(path.join(root, 'public/tracks.js'), 'utf8').replace('configureRoom(onChange, onAudio)', '_audio: selectAudio, _render: renderSubs, configureRoom(onChange, onAudio)');
+    vm.runInContext(source, context); const tracks = context.window.tracks;
+    tracks.configureRoom(s => shared.push(s), s => audio.push(s)); tracks.setMedia('movie'); tracks.setSettingsOwner(false);
+    const video = { ...element(), audioTracks: [], addEventListener: (name, fn) => { (handlers[name] ||= []).push(fn); }, appendChild: () => { appends++; } };
+    tracks.attach(video); tracks.applyRoomAudio({ language: 'hi', label: 'Hindi', index: 1 });
+    video.audioTracks.push({ language: 'en', label: 'English', enabled: true }, { language: 'hi', label: 'Hindi', enabled: false });
+    handlers.loadedmetadata.forEach(fn => fn()); assert.equal(video.audioTracks[1].enabled, true);
+    await tracks._audio(0); assert.equal(video.audioTracks[0].enabled, true);
+    tracks.applyRoomAudio({ language: 'hi', label: 'Hindi', index: 1 }); assert.equal(video.audioTracks[0].enabled, true); assert.equal(audio.length, 0);
+    const state = { vtt: 'WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello', key: 'room', label: 'English', lang: 'eng', offset: 0 };
+    tracks.applyShared(state); assert.equal(appends, 1);
+    const panel = element(); tracks._render(panel); panel.children.find(e => e.children?.some(c => c.textContent === 'Off'))?.children.find(c => c.textContent === 'Off').onclick();
+    const off = panel.children.flatMap(e => e.children || []).find(e => e.textContent === 'Off'); assert.ok(off);
+    tracks.applyShared({ ...state, offset: 2 }); assert.equal(appends, 1); assert.equal(shared.length, 0);
+    tracks.setMedia('next movie'); tracks.applyShared(state); assert.equal(appends, 2);
 });

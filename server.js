@@ -463,6 +463,8 @@ function getRoom(roomId) {
             // tokens, so it is never logged or stored.
             addons: null,
             subtitles: null,
+            audio: null,
+            audioRevision: 0,
             subtitleRevision: 0,
             watchEpoch: 0,
             // Voice room: socket id -> { username, muted, cam }. Audio/video go
@@ -700,6 +702,10 @@ function leaveRoom(socket, keep = false) {
     if (socket.data.embed) { if (room) leaveVoice(socket, room, roomId); return; } // the embedded Lounge was never in the list
     if (room) {
         room.users.delete(socket.id);
+        if (!room.party && room.videoState.settingsOwner === socket.id && room.users.size) {
+            room.videoState.settingsOwner = room.users.keys().next().value;
+            io.to(roomId).emit('room-settings-owner', { mediaId: room.videoState.mediaId, settingsOwner: room.videoState.settingsOwner });
+        }
         trail(roomId, `${username || '?'} left (${keep ? 'connection dropped' : 'on purpose'}); ${room.users.size} remain`);
         if (process.env.MAIL_MODE === 'log') console.log(`[room ${roomId}] - ${username} (${socket.id}) now ${room.users.size}`);
         room.pollVotes.delete(socket.id);
@@ -851,7 +857,7 @@ io.on('connection', (socket) => {
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
         const room = getRoom(roomId);
-        if (rebuilt) { room.videoState = { ...rebuilt, mediaId: crypto.randomBytes(12).toString('hex') }; room.restoredAt = Date.now(); }
+        if (rebuilt) { room.videoState = { ...rebuilt, mediaId: crypto.randomBytes(12).toString('hex'), settingsOwner: socket.id }; room.restoredAt = Date.now(); }
         if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
         socket.data.roomId = roomId;
         socket.data.username = username;
@@ -882,6 +888,7 @@ io.on('connection', (socket) => {
         // Bring the newcomer up to speed with the current video state.
         if (room.videoState.videoId || room.videoState.src) socket.emit('video-sync', stateNow(room));
         if (room.subtitles) socket.emit('subtitles-updated', room.subtitles);
+        if (room.audio) socket.emit('audio-updated', room.audio);
         if (room.addons) socket.emit('addons-updated', { addons: room.addons, user: null });
         if (room.voice.size) socket.emit('voice-members', [...room.voice].map(([id, m]) => ({ id, ...m })));
         broadcastUserCount(roomId);
@@ -989,6 +996,7 @@ io.on('connection', (socket) => {
         const room = getRoom(roomId);
         room.videoState = {
             mediaId: crypto.randomBytes(12).toString('hex'),
+            settingsOwner: socket.id,
             videoId: kind === 'yt' ? String(videoData.videoId || '') : '',
             src: kind === 'direct' ? src : '',
             kind,
@@ -999,6 +1007,8 @@ io.on('connection', (socket) => {
             lastUpdate: Date.now()
         };
         room.subtitles = null;
+        room.audio = null;
+        room.audioRevision = 0;
         room.subtitleRevision = 0;
         // Which kind of video was started (counts only — never the title or link).
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
@@ -1010,11 +1020,24 @@ io.on('connection', (socket) => {
         const reply = data => { if (typeof ack === 'function') ack(data); };
         const room = rooms.get(socket.data.roomId);
         if (!room || !room.videoState.mediaId || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false, message: 'The video changed. Pick the subtitle again.' });
+        if (!(room.party ? isHostSocket(socket, room) : room.videoState.settingsOwner === socket.id)) return reply({ ok: true, personal: true });
         const s = payload.state;
         if (!s || (s.vtt !== null && typeof s.vtt !== 'string') || (s.vtt && Buffer.byteLength(s.vtt) > MAX_SUBTITLE_BYTES)) return reply({ ok: false, message: 'Subtitle file too large (max 5 MB).' });
         const state = { vtt: s.vtt, key: String(s.key || '').slice(0, MAX_STREAM_URL), embeddedLang: String(s.embeddedLang || '').slice(0, 40), lang: String(s.lang || 'off').slice(0, 40), label: String(s.label || '').slice(0, MAX_TITLE), offset: Number.isFinite(s.offset) ? Math.max(-600, Math.min(600, s.offset)) : 0 };
         room.subtitles = { mediaId: payload.mediaId, state, revision: ++room.subtitleRevision, sender: socket.id };
         io.to(socket.data.roomId).emit('subtitles-updated', room.subtitles);
+        reply({ ok: true });
+    });
+
+    socket.on('set-audio', (payload = {}, ack) => {
+        const reply = data => { if (typeof ack === 'function') ack(data); };
+        const room = rooms.get(socket.data.roomId);
+        if (!room || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false });
+        if (!(room.party ? isHostSocket(socket, room) : room.videoState.settingsOwner === socket.id)) return reply({ ok: true, personal: true });
+        const s = payload.state;
+        if (!s || typeof s.language !== 'string' || s.language.length > 40 || !Number.isInteger(s.index) || s.index < 0 || s.index > 200) return reply({ ok: false });
+        room.audio = { mediaId: payload.mediaId, revision: ++room.audioRevision, state: { language: s.language, label: String(s.label || '').slice(0, MAX_TITLE), index: s.index } };
+        io.to(socket.data.roomId).emit('audio-updated', room.audio);
         reply({ ok: true });
     });
 

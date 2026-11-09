@@ -750,21 +750,35 @@ let nextCover = null;
 let currentContent = null; // { type, id, filename } of an addon title, for subtitles
 let lastLoaded = null;      // the room's video as last announced, to rebuild the room if the server restarts
 let roomSubtitle = null;
+let roomAudio = null;
 let subtitleRevision = 0;
 
 function setSubtitleMedia(data) {
     if (data.mediaId !== lastLoaded?.mediaId) {
         roomSubtitle = null;
+        roomAudio = null;
         subtitleRevision = 0;
-        window.tracks?.setMedia(data.mediaId);
+        window.tracks?.setMedia(data.mediaId, data.src);
     }
+    window.tracks?.setSettingsOwner(ownsRoomSettings(data));
+}
+
+function ownsRoomSettings(data = lastLoaded) {
+    return !!(party ? isHost() : data?.settingsOwner === socket?.id);
 }
 
 function shareRoomSubtitle({ mediaId, state }) {
-    if (!roomLive || !inRoom) return; // private playback has no other viewers yet
+    if (!roomLive || !inRoom || !ownsRoomSettings()) return;
     if (!socket?.connected || mediaId !== lastLoaded?.mediaId) { showToast('Reconnect to the room before changing subtitles.'); return; }
     socket.timeout(10000).emit('set-subtitles', { mediaId, state }, (error, result) => {
         if (error || !result?.ok) showToast(result?.message || 'The subtitle could not be shared. Try again.');
+    });
+}
+
+function shareRoomAudio({ mediaId, state }) {
+    if (!roomLive || !inRoom || !ownsRoomSettings() || mediaId !== lastLoaded?.mediaId) return;
+    socket.timeout(8000).emit('set-audio', { mediaId, state }, (error, result) => {
+        if (error || !result?.ok) showToast('Could not share the starting audio language.');
     });
 }
 
@@ -1351,7 +1365,7 @@ function createNativePlayer(src, opts) {
             live: !!roomLive, // a real room on the server (a party); watching alone is private until then
             invite: roomId ? `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(roomCode || roomId)}` : '',
             people: roomUsers.map(u => ({ id: u.id, name: u.name, you: (u.ids || [u.id]).includes(socket.id), buffering: !!u.buffering, host: !!(party && (u.ids || [u.id]).some(i => party.host === i || (Array.isArray(party.hosts) && party.hosts.includes(i)))), main: !!(party && (u.ids || [u.id]).includes(party.host)) })).sort((a, b) => b.you - a.you),
-            subs, subsLoading, roomSubtitle,
+            subs, subsLoading, roomSubtitle, roomAudio, isSettingsOwner: ownsRoomSettings(),
             subPref: window.tracks ? window.tracks.getPref() : '',
             episodes, current: currentContent ? currentContent.id : '', show: currentContent ? (currentContent.show || '') : '', showName, autoNext: autoNextOn(),
             hostOnly: !!party, isHost: isHost(), isMain: !!(party && socket && party.host === socket.id), hostName: party ? party.hostName : '', guestsCanPause: !!(party && party.guestsCanPause),
@@ -1514,9 +1528,13 @@ function createNativePlayer(src, opts) {
                 break;
             case 'subtitle':
                 if (ev.state && typeof ev.state === 'object') {
-                    window.tracks?.applyShared(ev.state, true);
+                    window.tracks?.makeSubtitlePersonal();
+                    window.tracks?.applyShared(ev.state, true, true);
                     shareRoomSubtitle({ mediaId: lastLoaded?.mediaId, state: ev.state });
                 }
+                break;
+            case 'audio':
+                if (ev.state) shareRoomAudio({ mediaId: lastLoaded?.mediaId, state: ev.state });
                 break;
             case 'chat':
                 if (window.reddateChat && typeof ev.text === 'string') window.reddateChat.send(ev.text);
@@ -1647,7 +1665,21 @@ function ensurePlayer(state) {
 
 
 function wireVideoEvents() {
-    window.tracks?.configureRoom(shareRoomSubtitle);
+    window.tracks?.configureRoom(shareRoomSubtitle, shareRoomAudio);
+    socket.on('audio-updated', payload => {
+        if (payload.mediaId !== lastLoaded?.mediaId || (roomAudio && payload.revision <= roomAudio.revision)) return;
+        roomAudio = payload;
+        window.tracks?.applyRoomAudio(payload.state);
+        if (window.reddateNativeInfo) window.reddateNativeInfo();
+    });
+    socket.on('party', () => { window.tracks?.setSettingsOwner(ownsRoomSettings()); if (window.reddateNativeInfo) window.reddateNativeInfo(); });
+    socket.on('room-settings-owner', data => {
+        if (data.mediaId !== lastLoaded?.mediaId) return;
+        lastLoaded.settingsOwner = data.settingsOwner;
+        window.tracks?.setSettingsOwner(ownsRoomSettings());
+        if (window.reddateNativeInfo) window.reddateNativeInfo();
+    });
+    socket.on('joined', () => window.tracks?.reportAudio(true));
     socket.on('subtitles-updated', payload => {
         if (payload.mediaId !== lastLoaded?.mediaId || payload.revision <= subtitleRevision) return;
         subtitleRevision = payload.revision;

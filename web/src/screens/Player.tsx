@@ -59,6 +59,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     const [look, setLook] = useState<SubLook>(loadLook);
     const [subDelay, setSubDelay] = useState(0);
     const subSelection = useRef(0);
+    const subtitlePersonal = useRef(false);
     const sharedSubRevision = useRef('');
     const selectedSub = useRef<Json>({ vtt: null, key: '', lang: 'off', label: '', offset: 0 });
     useEffect(() => () => { subSelection.current++; }, [open.sid]);
@@ -67,6 +68,12 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     const audioFallback = useRef<any>(null);
     const audioGate = useRef<any>(null);
     const audioChosen = useRef(false);
+    const audioPersonal = useRef(false);
+    const roomAudioRef = useRef<Json | null>(null);
+    roomAudioRef.current = info.roomAudio || null;
+    const settingsOwnerRef = useRef(false);
+    settingsOwnerRef.current = !!info.isSettingsOwner;
+    const reportedAudio = useRef('');
     const audioSelection = useRef(0);
     const audioRefresh = useRef<() => void>(() => {});
     const [audioStatus, setAudioStatus] = useState('');
@@ -88,6 +95,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     const expectSeek = useRef<number | null>(null);
     const readySent = useRef(false);
     async function selectAudio(id: number, lang: string, remember = true) {
+        if (remember) audioPersonal.current = true;
         const selection = ++audioSelection.current;
         const video = vref.current;
         const fallback = audioFallback.current;
@@ -129,6 +137,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
         const v = isYt ? (vref.current = new YtVideo(ytWrap.current!, open.videoId!)) : vref.current!;
         let dead = false;
         audioChosen.current = false;
+        audioPersonal.current = false; subtitlePersonal.current = false; reportedAudio.current = '';
         audioSelection.current++;
         setAudioStatus(''); setAudioPending(false); setAudioTracks([]);
         v.playbackRate = 1;
@@ -232,10 +241,24 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
             }
             setAudioTracks(tracks);
             setAudioStatus(fallback?.status || ''); setAudioPending(!!fallback?.pending);
+            const shared = roomAudioRef.current?.state;
+            if (shared && !audioPersonal.current && (!fallback || fallback.canAutoSelect)) {
+                const lang = audioLanguage(shared.language || '');
+                const match = tracks.find(t => t.lang === lang && t.label === shared.label) || (lang && tracks.find(t => t.lang === lang)) || (!lang && tracks[shared.index]);
+                if (match) { audioChosen.current = true; if (!match.on && !fallback?.pending) selectAudio(match.id, match.lang, false); }
+            }
             let pref = ''; try { pref = audioLanguage(localStorage.getItem('reddate-audio-lang') || ''); } catch { /* no storage */ }
-            if (!audioChosen.current && pref && (!fallback || fallback.canAutoSelect)) {
+            if (!shared && !audioChosen.current && pref && (!fallback || fallback.canAutoSelect)) {
                 const match = tracks.find(t => t.lang === pref) || tracks.find(t => t.lang && t.lang.split('-')[0] === pref.split('-')[0]);
                 if (match) { audioChosen.current = true; if (!match.on) selectAudio(match.id, match.lang, false); }
+            }
+            if (settingsOwnerRef.current && !fallback?.pending) {
+                const index = tracks.findIndex(t => t.on);
+                if (index >= 0) {
+                    const state = { language: tracks[index].lang, label: tracks[index].label, index };
+                    const signature = JSON.stringify(state);
+                    if (signature !== reportedAudio.current) { reportedAudio.current = signature; send({ type: 'audio', state }); }
+                }
             }
         }
         audioRefresh.current = refreshAudio;
@@ -446,7 +469,9 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     }
 
     // ---- subtitles ----
+    useEffect(() => { audioRefresh.current(); }, [info.roomAudio?.mediaId, info.roomAudio?.revision, info.isSettingsOwner]);
     async function useSub(s: Json | null) {
+        subtitlePersonal.current = true;
         const selection = ++subSelection.current;
         if (!s) {
             selectedSub.current = { vtt: null, key: '', lang: 'off', label: '', offset: 0 };
@@ -471,6 +496,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
         } catch { if (selection === subSelection.current) toast('That subtitle couldn’t be loaded here. Try another.'); }
     }
     function changeSubDelay(delay: number) {
+        subtitlePersonal.current = true;
         setSubDelay(delay);
         selectedSub.current = { ...selectedSub.current, offset: delay };
         send({ type: 'subtitle', state: selectedSub.current });
@@ -481,6 +507,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
         const revision = `${shared.mediaId}:${shared.revision}`;
         if (revision === sharedSubRevision.current) return;
         sharedSubRevision.current = revision;
+        if (subtitlePersonal.current && !info.isSettingsOwner) return;
         if (!shared.own) subSelection.current++;
         const s = shared.state;
         selectedSub.current = s;

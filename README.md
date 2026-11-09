@@ -51,7 +51,7 @@ viewer. Temporary audio buffering holds only that viewer's picture.
 
 ## What it is
 
-- **Watch together.** Start a room from your TV and share its code or QR. New viewers join the current video at the party's live position. Hosts control playback, while subtitle selection, Off, and timing changes are shared across devices. Audio language and subtitle appearance remain personal. Shared subtitle files are held in memory until the video changes or the room closes.
+- **Watch together.** Start a room from your TV and share its code or QR. New viewers join the current video at the party's live position, using the host's current audio and subtitles. Viewers can then choose another audio language, turn subtitles off, or adjust subtitle timing on their own device. Their choices do not change anyone else's player. Shared starting settings are held in memory until the video changes or the room closes.
 - **A TV app that feels native.** Home with Top 10 rows per streaming service, Continue watching, big posters, a remote-friendly layout and a stream picker that shows speed and device support before you press play.
 - **You bring the sources.** Reddate speaks the Stremio addon format, so the catalogs and stream sources you already use work. Reddate hosts no video.
 
