@@ -1,7 +1,6 @@
-/* Per-viewer subtitles and audio-track switching for the direct-video player.
+/* Shared subtitles and per-viewer audio-track switching for the direct-video player.
  *
- * Both are personal choices, so nothing here is synced to the room: each viewer
- * picks their own subtitle language / audio track.
+ * Subtitle files, Off and timing changes are shared with the room. Audio stays personal.
  *
  * Subtitles come from Stremio subtitle addons (built-in OpenSubtitles v3 plus
  * any the room added, via window.reddateAddons) or a local .srt/.vtt file.
@@ -41,6 +40,32 @@ window.tracks = (function () {
     let panelOpener = null;
     let fallback = null;
     let audioSelectionId = 0;
+    let subtitleSelectionId = 0;
+    let mediaId = null;
+    let sharedSubtitle = null;
+    let currentVtt = null;
+    let onSubtitleChange = null;
+    const MAX_SUB_BYTES = 5 * 1024 * 1024;
+
+    function publishSubtitle() {
+        const state = { vtt: currentVtt, key: activeSubUrl, lang: activeLang, label: activeLabel, offset };
+        sharedSubtitle = state;
+        if (onSubtitleChange && mediaId) onSubtitleChange({ mediaId, state });
+    }
+
+    function applySharedSubtitle(state, preserveSelection = false) {
+        if (!state || (state.vtt !== null && typeof state.vtt !== 'string')) return;
+        if (state.vtt && new TextEncoder().encode(state.vtt).length > MAX_SUB_BYTES) return;
+        if (!preserveSelection) subtitleSelectionId++;
+        sharedSubtitle = state;
+        if (!video) return;
+        if (state.vtt) attachVtt(state.vtt, String(state.key || 'shared'), String(state.lang || 'und'), String(state.label || 'Room subtitle'));
+        else clearSubtitle();
+        offset = Number.isFinite(state.offset) ? Math.max(-600, Math.min(600, state.offset)) : 0;
+        shiftCues();
+        setPanelStatus('');
+        renderPanel();
+    }
 
     const $ = id => document.getElementById(id);
     const modal = () => $('trackModal');
@@ -124,6 +149,7 @@ window.tracks = (function () {
         activeLang = 'off';
         activeLabel = '';
         offset = 0;
+        currentVtt = null;
     }
 
     function shiftCues() {
@@ -139,6 +165,7 @@ window.tracks = (function () {
     function attachVtt(vtt, key, lang, label) {
         if (!video) return;
         clearSubtitle();
+        currentVtt = vtt;
         blobUrl = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
         trackEl = document.createElement('track');
         trackEl.kind = 'subtitles';
@@ -156,15 +183,21 @@ window.tracks = (function () {
 
     async function applySubtitle(sub) {
         if (!video) return;
+        const selection = ++subtitleSelectionId;
+        const forVideo = video;
         setPanelStatus('Loading subtitle…');
         try {
             const res = await fetch(sub.url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const vtt = toVtt(decodeText(await res.arrayBuffer()));
+            if (selection !== subtitleSelectionId || video !== forVideo) return;
+            if (new TextEncoder().encode(vtt).length > MAX_SUB_BYTES) throw new Error('max 5 MB');
             attachVtt(vtt, sub.url, sub.lang, langName(sub.lang));
             setPref(sub.lang);
+            publishSubtitle();
             setPanelStatus('');
         } catch (e) {
+            if (selection !== subtitleSelectionId || video !== forVideo) return;
             setPanelStatus(`Couldn't load that subtitle (${e.message}). Try another one.`);
         }
         renderPanel();
@@ -174,8 +207,14 @@ window.tracks = (function () {
         if (!file || !video) return;
         if (file.size > 5 * 1024 * 1024) { toast('Subtitle file too large (max 5 MB)'); return; }
         const reader = new FileReader();
+        const selection = ++subtitleSelectionId;
+        const forVideo = video;
         reader.onload = () => {
-            attachVtt(toVtt(decodeText(reader.result)), `file:${file.name}`, 'und', file.name);
+            if (selection !== subtitleSelectionId || video !== forVideo) return;
+            const vtt = toVtt(decodeText(reader.result));
+            if (new TextEncoder().encode(vtt).length > MAX_SUB_BYTES) { toast('Subtitle file too large (max 5 MB)'); return; }
+            attachVtt(vtt, `file:${file.name}`, 'und', file.name);
+            publishSubtitle();
             renderPanel();
         };
         reader.readAsArrayBuffer(file);
@@ -191,17 +230,6 @@ window.tracks = (function () {
                 .catch(() => { subsPromise = null; return []; });
         }
         return subsPromise;
-    }
-
-    // Turn subtitles on automatically in the language this viewer last picked.
-    async function autoApplyPreferred() {
-        const pref = getPref();
-        if (pref === 'off' || !content) return;
-        const forVideo = video;
-        const list = await ensureSubs();
-        if (forVideo !== video || activeSubUrl) return;
-        const best = list.find(s => s.lang === pref);
-        if (best) applySubtitle(best);
     }
 
     // ---------- audio tracks ----------
@@ -442,6 +470,7 @@ window.tracks = (function () {
         const title = el('h2', null, 'Subtitles');
         title.id = 'trackModalTitle';
         b.appendChild(title);
+        b.appendChild(el('div', 'addon-help', 'Subtitle and timing changes apply to everyone in this room.'));
 
         // What's showing right now.
         const now = el('div', `sub-now ${activeSubUrl ? 'on' : ''}`);
@@ -460,7 +489,7 @@ window.tracks = (function () {
 
         const bar = el('div', 'browse-bar');
         const off = el('button', `tab-btn ${activeSubUrl ? '' : 'active'}`, 'Off');
-        off.onclick = () => { clearSubtitle(); setPref('off'); renderPanel(); };
+        off.onclick = () => { subtitleSelectionId++; clearSubtitle(); setPref('off'); publishSubtitle(); renderPanel(); };
         bar.appendChild(off);
         if (langs.size) {
             const sel = el('select', 'browse-select');
@@ -502,8 +531,8 @@ window.tracks = (function () {
             plus.setAttribute('aria-label', `Show subtitles ${OFFSET_STEP}s later`);
             const val = el('span', 'sub-offset mono', `${offset > 0 ? '+' : ''}${offset.toFixed(1)}s`);
             val.setAttribute('aria-live', 'polite');
-            minus.onclick = () => { offset -= OFFSET_STEP; shiftCues(); renderPanel(); };
-            plus.onclick = () => { offset += OFFSET_STEP; shiftCues(); renderPanel(); };
+            minus.onclick = () => { offset = Math.max(-600, offset - OFFSET_STEP); shiftCues(); publishSubtitle(); renderPanel(); };
+            plus.onclick = () => { offset = Math.min(600, offset + OFFSET_STEP); shiftCues(); publishSubtitle(); renderPanel(); };
             stepper.append(minus, val, plus);
             timing.append(stepper, el('span', 'addon-help', 'Subtitles too early? Press +. Too late? Press −.'));
             b.appendChild(timing);
@@ -546,6 +575,15 @@ window.tracks = (function () {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire); else wire();
 
     return {
+        configureRoom(onChange) { onSubtitleChange = onChange; },
+        setMedia(id) {
+            if (id === mediaId) return;
+            mediaId = id;
+            subtitleSelectionId++;
+            sharedSubtitle = null;
+            clearSubtitle();
+        },
+        applyShared: applySharedSubtitle,
         // A new <video> was created for a direct stream.
         attach(v, src) {
             clearAudioListeners();
@@ -573,6 +611,7 @@ window.tracks = (function () {
             if (fallback) listen(v, 'loadedmetadata', () => fallback?.load());
             listen(v, 'error', renderPanel);
             refreshAudioOptions();
+            if (sharedSubtitle) applySharedSubtitle(sharedSubtitle);
         },
         attachHls(h) {
             hls = h;
@@ -613,9 +652,9 @@ window.tracks = (function () {
             subs = null;
             subsPromise = null;
             browsingLang = null;
-            autoApplyPreferred();
         },
         detach() {
+            subtitleSelectionId++;
             clearAudioListeners();
             if (blobUrl) URL.revokeObjectURL(blobUrl);
             video = null;

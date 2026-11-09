@@ -33,6 +33,7 @@ const stats = require('./stats');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
+    maxHttpBufferSize: 8 * 1024 * 1024, // bounded encrypted subtitle files
     cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
@@ -240,6 +241,15 @@ const MAX_USERNAME = 40;
 const MAX_ADDONS_CIPHER = 32 * 1024; // encrypted addon list blob
 const MAX_STREAM_URL = 4096;
 const MAX_TITLE = 200;
+const MAX_SUBTITLE_CIPHER = 7 * 1024 * 1024;
+
+function stateNow(room) {
+    const now = Date.now();
+    const v = room.videoState;
+    return { ...v, currentTime: v.currentTime + (v.isPlaying ? Math.max(0, now - v.lastUpdate) / 1000 : 0), lastUpdate: now };
+}
+
+const cleanTime = t => typeof t === 'number' && Number.isFinite(t) && t >= 0 && t < 1e6 ? t : 0;
 
 function getRoom(roomId) {
     let room = rooms.get(roomId);
@@ -253,6 +263,8 @@ function getRoom(roomId) {
             // ({ iv, ciphertext }). Addon URLs carry auth tokens, so the
             // server stores and relays an opaque blob it cannot read.
             addons: null,
+            subtitles: null, // opaque room-key ciphertext, scoped to the loaded video
+            subtitleRevision: 0,
             watchEpoch: 0,
             // Voice room: socket id -> { username, muted, cam }. Audio/video go
             // peer-to-peer (WebRTC mesh); the server only relays signaling.
@@ -369,7 +381,8 @@ io.on('connection', (socket) => {
         });
 
         // Bring the newcomer up to speed with the current video state.
-        if (room.videoState.videoId || room.videoState.src) socket.emit('video-sync', room.videoState);
+        if (room.videoState.videoId || room.videoState.src) socket.emit('video-sync', stateNow(room));
+        if (room.subtitles) socket.emit('subtitles-updated', room.subtitles);
         if (room.addons) socket.emit('addons-updated', { ...room.addons, user: null });
         if (room.voice.size) socket.emit('voice-members', [...room.voice].map(([id, m]) => ({ id, ...m })));
         broadcastUserCount(roomId);
@@ -413,6 +426,7 @@ io.on('connection', (socket) => {
         const title = typeof videoData.title === 'string' ? videoData.title.slice(0, MAX_TITLE) : '';
         const room = getRoom(roomId);
         room.videoState = {
+            mediaId: crypto.randomBytes(12).toString('hex'),
             videoId: kind === 'yt' ? String(videoData.videoId || '') : '',
             src: kind === 'direct' ? src : '',
             kind,
@@ -422,10 +436,22 @@ io.on('connection', (socket) => {
             currentTime: 0,
             lastUpdate: Date.now()
         };
+        room.subtitles = null;
+        room.subtitleRevision = 0;
         // Which kind of video was started (counts only — never the title or link).
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
         room.watchEpoch++;
         io.to(roomId).emit('video-loaded', { ...room.videoState, user: socket.data.username });
+        reply({ ok: true });
+    });
+
+    socket.on('set-subtitles', (payload = {}, ack) => {
+        const reply = result => { if (typeof ack === 'function') ack(result); };
+        const room = rooms.get(socket.data.roomId);
+        if (!room || !room.videoState.mediaId || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false, message: 'The video changed. Pick the subtitle again.' });
+        if (typeof payload.iv !== 'string' || payload.iv.length > 32 || typeof payload.ciphertext !== 'string' || payload.ciphertext.length > MAX_SUBTITLE_CIPHER) return reply({ ok: false, message: 'Subtitle data is too large.' });
+        room.subtitles = { mediaId: payload.mediaId, iv: payload.iv, ciphertext: payload.ciphertext, revision: ++room.subtitleRevision, sender: socket.id };
+        io.to(socket.data.roomId).emit('subtitles-updated', room.subtitles);
         reply({ ok: true });
     });
 
@@ -444,8 +470,10 @@ io.on('connection', (socket) => {
         const roomId = socket.data.roomId;
         if (!roomId) return;
         const room = getRoom(roomId);
+        const now = stateNow(room);
+        if (now.isPlaying === !!data.isPlaying && Math.abs(now.currentTime - cleanTime(data.currentTime)) < 2) return;
         room.videoState.isPlaying = !!data.isPlaying;
-        room.videoState.currentTime = data.currentTime || 0;
+        room.videoState.currentTime = cleanTime(data.currentTime);
         room.videoState.lastUpdate = Date.now();
         room.watchEpoch++; // pauses (and resumes) never count as watch time
         socket.to(roomId).emit('video-playpause-sync', {
@@ -463,16 +491,17 @@ io.on('connection', (socket) => {
         const roomId = socket.data.roomId;
         if (!roomId) return;
         const room = getRoom(roomId);
-        room.videoState.currentTime = data.currentTime || 0;
-        room.videoState.lastUpdate = Date.now();
-        socket.to(roomId).emit('video-progress-sync', { currentTime: data.currentTime });
+        // A slow newcomer must never move the room back to their loading position.
+        socket.to(roomId).emit('video-progress-sync', stateNow(room));
         countWatchTime(socket, room);
     });
 
     socket.on('video-seek', (data = {}) => {
         const roomId = socket.data.roomId;
         if (!roomId) return;
-        getRoom(roomId).videoState.currentTime = data.currentTime || 0;
+        const room = getRoom(roomId);
+        room.videoState.currentTime = cleanTime(data.currentTime);
+        room.videoState.lastUpdate = Date.now();
         socket.to(roomId).emit('video-seek', { currentTime: data.currentTime, user: socket.data.username });
     });
 
@@ -480,12 +509,12 @@ io.on('connection', (socket) => {
         const roomId = socket.data.roomId;
         if (!roomId) return;
         const room = getRoom(roomId);
-        if (data) {
-            room.videoState.currentTime = data.currentTime || room.videoState.currentTime;
+        if (typeof data.currentTime === 'number') {
+            room.videoState.currentTime = cleanTime(data.currentTime);
             room.videoState.isPlaying = !!data.isPlaying;
             room.videoState.lastUpdate = Date.now();
         }
-        io.to(roomId).emit('video-sync', room.videoState);
+        io.to(roomId).emit('video-sync', stateNow(room));
     });
 
     // ---- Polls (preset questions, non-private) ----

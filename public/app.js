@@ -70,6 +70,10 @@ let isPlayerReady = false;
 let isVideoPlaying = false;
 let ignoreNextStateChange = false;
 let pendingState = null;    // play/pause/seek to apply once the player is ready
+let roomPlayback = null;
+let autoplayBlocked = false;
+let currentMediaId = null;
+let subtitleRevision = 0;
 let typingTimer = null;
 
 // Generic trigger words -> reaction emoji. Detected client-side on decrypted
@@ -303,10 +307,6 @@ function startApp() {
         updateRoomShare();
         addSystemMessage('🔒 Connected securely. Share the room code or invite link to bring someone in.');
     });
-    if (socket.connected) {
-        markConnected();
-        socket.emit('join-room', { roomId, username: currentUser });
-    }
     socket.on('user-count', c => {
         userCount = c;
         document.getElementById('userCount').textContent = `${c} online`;
@@ -354,6 +354,11 @@ function startApp() {
         toast: showToast,
         loadVideo: requestVideoLoad
     });
+    // Register every replay listener before requesting the room snapshot.
+    if (socket.connected) {
+        markConnected();
+        socket.emit('join-room', { roomId, username: currentUser });
+    }
 }
 
 // ---------------- Chat ----------------
@@ -634,6 +639,7 @@ function destroyPlayer() {
     if (vp && vp.destroy) { try { vp.destroy(); } catch (_) {} }
     vp = null;
     isPlayerReady = false;
+    autoplayBlocked = false;
     stageEl().innerHTML = '';
     setPlayerStatus('');
     if (window.tracks) window.tracks.detach(); // subtitles / audio tracks (tracks.js)
@@ -642,9 +648,19 @@ function destroyPlayer() {
 function setPlayerStatus(text) { document.getElementById('playerStatus').textContent = text; }
 
 function onLocalPlayPause(playing) {
+    autoplayBlocked = false;
     isVideoPlaying = playing;
     updatePlayPauseButton();
     socket.emit('video-playpause', { isPlaying: playing, currentTime: vp ? vp.getCurrentTime() : 0 });
+}
+
+function playbackState(data) {
+    roomPlayback = { isPlaying: !!data.isPlaying, currentTime: Math.max(0, Number(data.currentTime) || 0), receivedAt: Date.now() };
+    return roomPlayback;
+}
+
+function playbackPosition(s) {
+    return s.currentTime + (s.isPlaying ? Math.max(0, Date.now() - s.receivedAt) / 1000 : 0);
 }
 
 function applyPending() {
@@ -652,7 +668,7 @@ function applyPending() {
     const s = pendingState;
     pendingState = null;
     ignoreNextStateChange = true;
-    if (s.currentTime) vp.seekTo(s.currentTime);
+    vp.seekTo(playbackPosition(s));
     s.isPlaying ? vp.play() : vp.pause();
     isVideoPlaying = s.isPlaying;
     updatePlayPauseButton();
@@ -771,7 +787,12 @@ function createDirectPlayer(src) {
         onBuffering: buffering => {
             document.getElementById('audioBufferingStatus').hidden = !buffering;
         },
-        onPlayError: () => { ignoreNextStateChange = false; showToast('Tap Play to resume playback'); }
+        onPlayError: () => {
+            ignoreNextStateChange = false;
+            autoplayBlocked = true;
+            updatePlayPauseButton();
+            setPlayerStatus('Your browser needs a click. Press Play to join the live video.');
+        }
     });
     if (window.tracks) window.tracks.attach(v, src);
     // Addon sources can take a minute to resolve; say so instead of showing a dead black box.
@@ -831,45 +852,75 @@ function ensurePlayer(state) {
 
 
 function wireVideoEvents() {
+    let subtitleSendQueue = Promise.resolve();
+    let subtitleReceiveQueue = Promise.resolve();
+    window.tracks?.configureRoom(({ mediaId, state }) => {
+        subtitleSendQueue = subtitleSendQueue.then(async () => {
+            if (!roomJoined || mediaId !== currentMediaId) throw new Error('Reconnect to the room before changing subtitles.');
+            const payload = await encryptText(roomKey, JSON.stringify(state));
+            if (mediaId !== currentMediaId) return;
+            const result = await new Promise((resolve, reject) => socket.timeout(10000).emit('set-subtitles', { ...payload, mediaId }, (error, data) => error ? reject(new Error('The subtitle could not be shared. Try again.')) : resolve(data)));
+            if (!result?.ok) throw new Error(result?.message || 'The subtitle could not be shared.');
+        }).catch(error => showToast(error.message));
+    });
+    socket.on('subtitles-updated', payload => {
+        subtitleReceiveQueue = subtitleReceiveQueue.then(async () => {
+            if (payload.mediaId !== currentMediaId || payload.revision <= subtitleRevision) return;
+            const state = JSON.parse(await decryptText(roomKey, payload));
+            if (payload.mediaId !== currentMediaId) return;
+            subtitleRevision = payload.revision;
+            window.tracks?.applyShared(state, payload.sender === socket.id);
+        }).catch(() => showToast('The room subtitle could not be decrypted. Check your invite link.'));
+    });
+    const setMedia = data => {
+        if (data.mediaId !== currentMediaId) {
+            currentMediaId = data.mediaId;
+            subtitleRevision = 0;
+            window.tracks?.setMedia(currentMediaId);
+        }
+    };
     socket.on('video-loaded', data => {
-        pendingState = { isPlaying: !!data.isPlaying, currentTime: data.currentTime || 0 };
+        setMedia(data);
+        pendingState = playbackState(data);
         ensurePlayer(data);
         setNowPlaying(data.title);
         if (window.tracks && data.kind === 'direct') window.tracks.setContent(data.content);
+        if (isPlayerReady) applyPending();
         addSystemMessage(`🎬 ${data.user} loaded ${data.title ? `“${data.title}”` : 'a video'}`);
     });
     socket.on('video-playpause-sync', data => {
+        pendingState = playbackState(data);
         isVideoPlaying = data.isPlaying;
         updatePlayPauseButton();
-        if (!vp || !isPlayerReady) { pendingState = { isPlaying: data.isPlaying, currentTime: data.currentTime }; return; }
-        ignoreNextStateChange = true;
-        if (data.currentTime) vp.seekTo(data.currentTime);
-        data.isPlaying ? vp.play() : vp.pause();
+        if (vp && isPlayerReady) applyPending();
     });
     socket.on('video-progress-sync', data => {
+        const state = playbackState(data);
+        if (!isPlayerReady) { pendingState = state; return; }
         if (!vp || !isPlayerReady || vp.isBuffering?.()) return;
         if (vp.canSyncProgress && !vp.canSyncProgress()) return;
         if (Math.abs(vp.getCurrentTime() - data.currentTime) > 2) vp.seekTo(data.currentTime);
     });
     socket.on('video-seek', data => {
+        const state = playbackState({ ...data, isPlaying: roomPlayback?.isPlaying || false });
+        if (!isPlayerReady) pendingState = state;
         // Skip seeks to where we already are, so a stray echo can't start a loop.
         if (vp && isPlayerReady && Math.abs(vp.getCurrentTime() - data.currentTime) > 0.5) vp.seekTo(data.currentTime);
     });
     socket.on('video-sync', state => {
+        setMedia(state);
+        pendingState = playbackState(state);
         if (!ensurePlayer(state)) return;
         setNowPlaying(state.title);
         if (window.tracks && state.kind === 'direct') window.tracks.setContent(state.content);
         isVideoPlaying = state.isPlaying;
         updatePlayPauseButton();
-        if (!isPlayerReady) { pendingState = { isPlaying: state.isPlaying, currentTime: state.currentTime }; return; }
-        ignoreNextStateChange = true;
-        if (state.currentTime) vp.seekTo(state.currentTime);
-        state.isPlaying ? vp.play() : vp.pause();
+        if (isPlayerReady) applyPending();
     });
 
     // Periodically share our position so late joiners / drifters stay in sync.
     setInterval(() => {
-        if (vp && isPlayerReady && isVideoPlaying && !vp.isBuffering?.()) {
+        if (vp && isPlayerReady && isVideoPlaying && !autoplayBlocked && !vp.isBuffering?.()) {
             socket.emit('video-progress', { currentTime: vp.getCurrentTime() });
         }
     }, 4000);
@@ -929,6 +980,15 @@ async function loadVideo(inputId) {
 
 function togglePlayPause() {
     if (!vp || !isPlayerReady) { showToast('Load a video first'); return; }
+    if (autoplayBlocked) {
+        autoplayBlocked = false;
+        setPlayerStatus('');
+        if (roomPlayback) vp.seekTo(playbackPosition(roomPlayback));
+        ignoreNextStateChange = true;
+        vp.play();
+        updatePlayPauseButton();
+        return;
+    }
     const shouldPlay = !isVideoPlaying;
     isVideoPlaying = shouldPlay;
     updatePlayPauseButton();
@@ -939,8 +999,8 @@ function togglePlayPause() {
 
 function updatePlayPauseButton() {
     const btn = document.getElementById('playPauseBtn');
-    btn.querySelector('use').setAttribute('href', isVideoPlaying ? '#i-pause' : '#i-play');
-    btn.querySelector('.label').textContent = isVideoPlaying ? 'Pause' : 'Play';
+    btn.querySelector('use').setAttribute('href', isVideoPlaying && !autoplayBlocked ? '#i-pause' : '#i-play');
+    btn.querySelector('.label').textContent = isVideoPlaying && !autoplayBlocked ? 'Pause' : 'Play';
 }
 
 function syncVideo() {

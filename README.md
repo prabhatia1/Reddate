@@ -94,14 +94,16 @@ How it fits together:
 
 ### Subtitles & audio tracks
 
-Both are **per viewer** — each person picks their own; nothing is synced.
+Subtitles are shared by the room; audio language is chosen separately on each device.
 
 - **💬 Subtitles** — for titles picked from Browse, subtitles come from the
   built-in OpenSubtitles v3 addon plus any room addon that offers subtitles.
   Pick a language and a file (ones matching the stream's release are ranked
   first, early CAM/TS rips last), nudge timing ±0.5s if they drift, or load
-  your own `.srt`/`.vtt` file for any video. Your language is remembered and
-  applied automatically to the next title.
+  your own `.srt`/`.vtt` file (up to 5 MB) for any video. Selecting a subtitle,
+  turning it off, or changing its timing applies to everyone, including people
+  who join later. Subtitle data is encrypted with the room key and held in memory
+  until the video changes or the room closes. Your last language helps sort the picker.
 - **🔊 Language** — open the Language button below the video, or the audio
   icon in full-screen mode, to switch audio while watching (e.g. Hindi / English).
   Your choice applies only to you, keeps the playback position, and is remembered
@@ -246,7 +248,7 @@ views/stats.html   # The private stats page (served only after the password chec
 public/index.html  # Markup + styles (lobby + app shell)
 public/app.js      # Client logic: E2E crypto, chat, video sync (YouTube + direct links + HLS), polls
 public/addons.js   # Stremio-compatible addons: catalogs, search, episodes, stream picker
-public/tracks.js   # Per-viewer subtitles (addon + local files) and audio-track switching
+public/tracks.js   # Shared subtitles (addon + local files) and per-viewer audio switching
 public/audio-fallback.js # Keeps extracted audio aligned with the original video
 public/playback-gate.js # Coordinates local audio buffering without pausing the room
 media-audio.js     # Optional FFmpeg audio extraction, in-memory sessions and bounded chunks
