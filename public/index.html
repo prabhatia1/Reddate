@@ -840,6 +840,17 @@
                 <input type="text" class="lobby-input" id="usernameInput" placeholder="throwaway_42" maxlength="40" autocomplete="off">
             </div>
             <button class="btn btn-primary" id="lobbyBtn">Create a room</button>
+            <div id="roomOptions">
+                <div class="field" style="margin-top: 1rem">
+                    <label class="field-label" for="customCode">Your room code (optional)</label>
+                    <input class="lobby-input" id="customCode" placeholder="A7B2C — leave blank to generate" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false">
+                </div>
+                <div class="field" style="margin-top: 1rem">
+                    <label class="field-label" for="joinInput">Join with a code or invite link</label>
+                    <input class="lobby-input" id="joinInput" placeholder="A7B2C or paste an invite link" maxlength="2048" autocomplete="off" spellcheck="false">
+                </div>
+                <button class="btn btn-primary" id="joinBtn">Join a room</button>
+            </div>
             <a class="lobby-support" id="supportLobby" href="#" target="_blank" rel="noopener noreferrer" hidden>
                 <svg class="icon" aria-hidden="true"><use href="#i-coffee"/></svg>Enjoying it? Buy me a coffee
             </a>
@@ -900,6 +911,7 @@
                 <div class="post-meta">
                     <span class="op-tag">OP</span>
                     <span id="postAuthor">Posted by u/…</span>
+                    <span id="roomCode" class="mono" hidden></span>
                     <span aria-hidden="true">·</span>
                     <span>just now</span>
                     <span class="pinned-sep" aria-hidden="true">·</span>
@@ -1130,6 +1142,8 @@
     <script src="/audio-fallback.js"></script>
     <script src="/playback-gate.js"></script>
     <script src="/tracks.js"></script>
+    <script src="/party-code.js"></script>
+    <script src="/room-key.js"></script>
     <script src="/app.js"></script>
     <script src="/voice.js"></script>
 <div id="rd-new" role="dialog" aria-labelledby="rd-new-h" style="position:fixed;inset:auto 16px 16px auto;width:min(360px,calc(100vw - 32px));box-sizing:border-box;z-index:99999;background:#1d1917;color:#f6f1ea;border:1px solid #3a322d;border-radius:16px;padding:18px 20px;font:500 15px/1.5 system-ui,sans-serif;box-shadow:0 20px 60px rgba(0,0,0,.5)" hidden>

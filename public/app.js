@@ -32,7 +32,7 @@ async function exportKey(key) {
     return bytesToB64url(new Uint8Array(raw));
 }
 async function importKey(b64) {
-    return crypto.subtle.importKey('raw', b64urlToBytes(b64), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    return crypto.subtle.importKey('raw', b64urlToBytes(b64), { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
 }
 async function encryptText(key, text) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -60,6 +60,7 @@ function parseFragment() {
 let socket = null;
 let roomKey = null;      // CryptoKey
 let roomId = null;
+let roomCode = '';
 let currentUser = 'Guest';
 
 let vp = null;              // unified player adapter (YouTube or HTML5 <video>)
@@ -129,25 +130,87 @@ if (isJoining) {
 usernameInput.focus();
 usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') lobbyBtn.click(); });
 
-lobbyBtn.addEventListener('click', async () => {
+const joinInput = document.getElementById('joinInput');
+const customCode = document.getElementById('customCode');
+const joinBtn = document.getElementById('joinBtn');
+const partyConfig = fetch('/party-config').then(r => r.json()).catch(() => ({ origin: '' }));
+partyConfig.then(config => {
+    if (config.origin && !isJoining) lobbyTagline.textContent = 'Create or join a party with browsers and Android TVs. Use a 5-character code or invite link.';
+});
+if (isJoining) document.getElementById('roomOptions').hidden = true;
+
+async function inviteSocket() {
+    if (!socket) socket = io();
+    if (socket.connected) return socket;
+    await new Promise((resolve, reject) => {
+        const cleanup = () => { clearTimeout(timer); socket.off('connect', ready); socket.off('connect_error', failed); };
+        const ready = () => { cleanup(); resolve(); };
+        const failed = () => { cleanup(); reject(new Error('Could not connect. Try again.')); };
+        const timer = setTimeout(failed, 8000);
+        socket.once('connect', ready); socket.once('connect_error', failed);
+    });
+    return socket;
+}
+function resolveCode(code) {
+    return new Promise((resolve, reject) => {
+        socket.timeout(8000).emit('resolve-room', { code }, (error, result) => {
+            if (error) reject(new Error('Could not check that code. Try again.'));
+            else if (!result?.ok) reject(new Error(result?.message || 'That party has ended.'));
+            else resolve(result);
+        });
+    });
+}
+async function enterFromLobby(joining) {
     const name = usernameInput.value.trim();
     if (!name) { usernameInput.focus(); return; }
     currentUser = name;
-    lobbyBtn.disabled = true;
-
-    if (isJoining) {
-        roomId = existing.roomId;
-        roomKey = await importKey(existing.keyB64);
-    } else {
-        roomId = randomRoomId();
-        const key = await generateRoomKey();
-        roomKey = key;
-        const keyB64 = await exportKey(key);
-        location.hash = `room=${encodeURIComponent(roomId)}&k=${keyB64}`;
+    lobbyBtn.disabled = joinBtn.disabled = true;
+    try {
+        const invite = joining ? partyCode.parse(joinInput.value) : null;
+        if (joining && !invite) throw new Error('Enter a 5-character room code or a valid invite link.');
+        const chosen = customCode.value.trim().toUpperCase();
+        if (!joining && !isJoining && chosen && !/^[A-Z0-9]{5}$/.test(chosen)) throw new Error('Use exactly 5 letters or numbers for the room code.');
+        const config = await partyConfig;
+        // Both public websites create and join on the TV service. Existing
+        // encrypted links continue to use this site's original relay.
+        if (config.origin && !isJoining && !invite?.key) {
+            const path = joining ? `/join/${encodeURIComponent(invite.code)}` : `/classic?create=1&name=${encodeURIComponent(name)}&code=${encodeURIComponent(chosen)}`;
+            location.assign(config.origin + path);
+            return;
+        }
+        await inviteSocket();
+        if (isJoining || invite?.key) {
+            roomId = invite?.code || existing.roomId;
+            roomKey = await importKey(invite?.key || existing.keyB64);
+        } else if (joining) {
+            const found = await resolveCode(invite.code);
+            roomId = found.roomId;
+            roomCode = found.code;
+            roomKey = await roomKeys.request(socket, roomId);
+        } else {
+            roomId = randomRoomId();
+            roomKey = await generateRoomKey();
+            const result = await new Promise((resolve, reject) => socket.timeout(8000).emit('join-room', { roomId, username: currentUser, roomCode: chosen }, (error, data) => error ? reject(new Error('Could not create the room. Try again.')) : resolve(data)));
+            if (!result?.ok) throw new Error(result?.message || 'Could not create the room.');
+            roomCode = result.code;
+        }
+        history.replaceState(null, '', `/#room=${encodeURIComponent(roomId)}&k=${await exportKey(roomKey)}`);
+        startApp();
+    } catch (error) {
+        showToast(error.message || 'Could not join the room. Try again.');
+    } finally {
+        lobbyBtn.disabled = joinBtn.disabled = false;
     }
-
-    startApp();
-});
+}
+const pathInvite = partyCode.parse(location.pathname + location.hash);
+lobbyBtn.addEventListener('click', () => enterFromLobby(!!pathInvite && !isJoining));
+joinBtn.addEventListener('click', () => enterFromLobby(true));
+joinInput.addEventListener('keydown', e => { if (e.key === 'Enter') joinBtn.click(); });
+if (!isJoining && pathInvite) {
+    joinInput.value = pathInvite.code;
+    lobbyBtn.textContent = 'Join room';
+    customCode.closest('.field').hidden = true;
+}
 
 function showToast(msg) {
     const t = document.getElementById('toast');
@@ -183,19 +246,27 @@ function startApp() {
     lobbyEl.classList.add('hidden');
     appEl.classList.remove('hidden');
 
-    socket = io();
+    socket = socket || io();
+    roomKeys.serve(socket, () => roomId, () => roomKey);
 
     socket.on('connect', () => {
         document.getElementById('connectionStatus').classList.remove('disconnected');
         document.getElementById('connectionText').textContent = 'Connected';
-        socket.emit('join-room', { roomId, username: currentUser });
+        socket.emit('join-room', { roomId, username: currentUser, roomCode });
     });
     socket.on('disconnect', () => {
         document.getElementById('connectionStatus').classList.add('disconnected');
         document.getElementById('connectionText').textContent = 'Disconnected';
     });
 
-    socket.on('joined', () => addSystemMessage('🔒 Connected securely. Share the invite link to bring someone in.'));
+    socket.on('joined', data => {
+        roomCode = data.code || roomCode;
+        const badge = document.getElementById('roomCode');
+        badge.textContent = `Room ${roomCode}`;
+        badge.hidden = !roomCode;
+        addSystemMessage('🔒 Connected securely. Share the room code or invite link to bring someone in.');
+    });
+    if (socket.connected) socket.emit('join-room', { roomId, username: currentUser, roomCode });
     socket.on('user-count', c => {
         userCount = c;
         document.getElementById('userCount').textContent = `${c} online`;

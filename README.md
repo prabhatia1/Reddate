@@ -15,6 +15,27 @@ anywhere** can spin up a room and share the link. Styled after Reddit
 
 ## Features
 
+- **Five-character party codes and invite links** — join using a code such as
+  `A7B2C`, or paste/open an invite link. Hosts can pick an available code or leave
+  it blank to generate one. Codes accept either letter case.
+- **Browser and Android TV in one room** — new parties on `reddate.xyz` use the
+  TV service, so people from both websites and the Android TV app watch and chat
+  in the same room. Existing encrypted browser invite links keep working locally.
+
+For self-hosting both branches, run the `tv` server once and set
+`SHARED_PARTY_URL` on the `main` server to its address (for example,
+`http://localhost:3090`). For production, point both domains at the TV service,
+or keep `main` serving the browser lobby with `SHARED_PARTY_URL` pointing at the
+TV service. The public `reddate.xyz` lobby defaults to `https://tv.reddate.xyz`.
+Separate Node processes keep separate rooms; the shared service is what lets all
+devices use the same code. On the TV service, party chat follows the TV branch's
+privacy model and is relayed without end-to-end encryption.
+
+When running `main` on its own, code joiners receive the random room encryption
+key from a connected room member through an ephemeral ECDH/AES-GCM exchange.
+The server relays public keys and encrypted key transfers. Code lookup and peer
+discovery trust the relay; full encrypted invite links remain available.
+
 - 🎬 **Synced video playback** — YouTube links *and* direct video URLs (`.mp4`,
   `.webm`, `.ogg`, …). Play, pause, seek and load together; late joiners and
   drifters auto-catch-up. Playback commands that arrive before a viewer's player

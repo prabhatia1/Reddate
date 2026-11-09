@@ -42,6 +42,18 @@ app.set('trust proxy', 1);
 app.use(express.static('public'));
 require('./media-audio').registerMediaAudio(app);
 
+// The two public sites share the TV service for new parties. A self-hosted
+// browser site can opt in with SHARED_PARTY_URL; legacy encrypted rooms stay local.
+app.get('/party-config', (req, res) => {
+    let origin = process.env.SHARED_PARTY_URL || (/^(www\.)?reddate\.xyz$/i.test(req.hostname) ? 'https://tv.reddate.xyz' : '');
+    try {
+        const url = new URL(origin);
+        origin = ['http:', 'https:'].includes(url.protocol) ? url.origin : '';
+    } catch (_) { origin = ''; }
+    res.set('Cache-Control', 'no-store').json({ origin });
+});
+app.get(['/join/:code', '/join'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
 // ---- Anonymous usage stats (stats.js) ----
 // The page pings once per load (Render's health checks would inflate a
 // server-side count), plus a few feature events the server can't see —
@@ -215,6 +227,8 @@ app.post('/media-info', express.json({ limit: '8kb' }), async (req, res) => {
 
 // roomId -> { videoState, users: Map<socketId, {username}>, poll, pollVotes: Map, addons }
 const rooms = new Map();
+const { createRoomCodes, registerRoomCodes } = require('./room-codes');
+const roomCodes = createRoomCodes(rooms);
 
 const MAX_ROOM_ID = 128;
 const MAX_USERNAME = 40;
@@ -240,6 +254,7 @@ function getRoom(roomId) {
             voice: new Map()
         };
         rooms.set(roomId, room);
+        roomCodes.assign(roomId);
     }
     return room;
 }
@@ -328,15 +343,26 @@ io.on('connection', (socket) => {
     });
 
     stats.observeOnline(io.engine.clientsCount);
-    socket.on('join-room', ({ roomId, username } = {}) => {
+    registerRoomCodes(socket, roomCodes, rooms, { encrypted: true });
+    socket.on('join-room', ({ roomId, username, roomCode } = {}, ack) => {
         if (typeof roomId !== 'string' || !roomId || roomId.length > MAX_ROOM_ID) return;
+        if (roomCode && !rooms.has(roomId)) {
+            const code = typeof roomCode === 'string' ? roomCode.trim().toUpperCase() : '';
+            if (!/^[A-Z0-9]{5}$/.test(code) || roomCodes.find(code)) {
+                const error = { ok: false, message: 'Use an available 5-character code containing letters or numbers.' };
+                if (typeof ack === 'function') ack(error);
+                return;
+            }
+        }
         username = (typeof username === 'string' ? username : '').slice(0, MAX_USERNAME).trim() || 'Guest';
 
-        if (socket.data.roomId) leaveRoom(socket); // leave any previous room first
+        if (socket.data.roomId && socket.data.roomId !== roomId) leaveRoom(socket); // leave any previous room first
 
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
+        const creating = !rooms.has(roomId);
         const room = getRoom(roomId);
+        if (roomCode && creating) room.code = roomCode.trim().toUpperCase();
         socket.data.roomId = roomId;
         socket.data.username = username;
         socket.join(roomId);
@@ -352,7 +378,8 @@ io.on('connection', (socket) => {
         if (room.addons) socket.emit('addons-updated', { ...room.addons, user: null });
         if (room.voice.size) socket.emit('voice-members', [...room.voice].map(([id, m]) => ({ id, ...m })));
         broadcastUserCount(roomId);
-        socket.emit('joined', { roomId });
+        socket.emit('joined', { roomId, code: roomCodes.assign(roomId) });
+        if (typeof ack === 'function') ack({ ok: true, roomId, code: room.code });
     });
 
     // ---- Encrypted chat relay (server never sees plaintext) ----
