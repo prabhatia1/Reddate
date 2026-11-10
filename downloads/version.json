@@ -1,7 +1,7 @@
 {
- "versionCode": 43,
- "versionName": "0.4.3",
- "size": 3270309,
- "sha256": "060a260ca44314d1d5b26788c1c923532241be4cf8f17f9a8297d6332442cf43",
- "notes": "New: Calendar of upcoming releases and watch tracking|Playlist search bug fixed"
+ "versionCode": 44,
+ "versionName": "0.4.4",
+ "size": 3270319,
+ "sha256": "87883d1dbd761963dd2338fd4dc7999cbf91e22076d2eb229e9dddb76b73353c",
+ "notes": "New: Subtitles stay in sync across TVs|Late viewers open at the live position|Five-character party codes shared with the browser, with copy buttons|Guests start with the host's audio and subtitle languages|Poster titles on the home screen and simpler party creation"
 }
