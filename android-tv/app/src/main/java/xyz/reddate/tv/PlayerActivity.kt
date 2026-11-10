@@ -71,6 +71,9 @@ class PlayerActivity : Activity() {
     val subs = SubtitleEngine()
     val audioTap = AudioTap()
     var subDelayMs = 0L
+    private var subtitleSelection = 0
+    var subtitlePersonal = false
+    private var sharedSubtitleState = JSONObject().put("vtt", JSONObject.NULL).put("offset", 0)
     private var lastSubText = ""
     private var previewing = false
     private val prefs by lazy { getSharedPreferences("player", MODE_PRIVATE) }
@@ -97,11 +100,15 @@ class PlayerActivity : Activity() {
     }
 
     fun useExternalSubtitle(u: String, done: (Boolean) -> Unit) {
+        val selection = ++subtitleSelection
         Thread {
-            val ok = subs.load(u)
+            val pending = SubtitleEngine()
+            val ok = pending.load(u)
             DevLog.log("sub-ext", "load ok=$ok cues=${subs.cues.size} err=${subs.lastError} url=${u.take(60)}")
             runOnUiThread {
+                if (selection != subtitleSelection || isFinishing) return@runOnUiThread
                 if (ok && !isFinishing) {
+                    subs.useText(pending.asVtt(), u)
                     player?.let { it.trackSelectionParameters = it.trackSelectionParameters.buildUpon().setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build() }
                     lastSubText = "\u0000"
                 }
@@ -111,9 +118,52 @@ class PlayerActivity : Activity() {
     }
 
     fun clearExternalSubtitle() {
+        subtitleSelection++
         subs.clear()
         lastSubText = ""
         view.subtitleView?.setCues(emptyList())
+    }
+
+    fun shareExternalSubtitle(lang: String, label: String) {
+        subtitlePersonal = true
+        sharedSubtitleState = JSONObject().put("vtt", subs.asVtt()).put("key", subs.url).put("lang", lang).put("label", label).put("offset", subDelayMs / 1000.0)
+        emit("subtitle") { put("state", sharedSubtitleState) }
+    }
+
+    fun shareSubtitleOff() {
+        subtitlePersonal = true
+        subDelayMs = 0
+        sharedSubtitleState = JSONObject().put("vtt", JSONObject.NULL).put("lang", "off").put("offset", 0)
+        emit("subtitle") { put("state", sharedSubtitleState) }
+    }
+
+    fun shareEmbeddedSubtitle(lang: String, label: String) {
+        subtitlePersonal = true
+        sharedSubtitleState = JSONObject().put("vtt", JSONObject.NULL).put("embeddedLang", lang).put("lang", lang).put("label", label).put("offset", 0)
+        emit("subtitle") { put("state", sharedSubtitleState) }
+    }
+
+    fun shareSubtitleTiming() {
+        subtitlePersonal = true
+        sharedSubtitleState.put("offset", subDelayMs / 1000.0)
+        emit("subtitle") { put("state", sharedSubtitleState) }
+    }
+
+    fun emitCurrentSubtitle() = emit("subtitle") { put("state", sharedSubtitleState) }
+
+    fun applySharedSubtitle(state: JSONObject, own: Boolean) {
+        if (!own) subtitleSelection++
+        sharedSubtitleState = state
+        subDelayMs = (state.optDouble("offset", 0.0) * 1000).toLong()
+        if (!state.isNull("vtt") && state.optString("vtt").isNotEmpty()) {
+            if (subs.useText(state.optString("vtt"), state.optString("key"))) {
+                player?.let { it.trackSelectionParameters = it.trackSelectionParameters.buildUpon().setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true).build() }
+                lastSubText = "\u0000"
+            }
+        } else {
+            subs.clear(); lastSubText = ""; view.subtitleView?.setCues(emptyList())
+            player?.let { it.trackSelectionParameters = it.trackSelectionParameters.buildUpon().setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, state.optString("embeddedLang").isEmpty()).build() }
+        }
     }
 
     fun previewSubtitles(on: Boolean) {
@@ -260,6 +310,9 @@ class PlayerActivity : Activity() {
         url = u
         titleText = i.getStringExtra("title") ?: ""
         controls.reset(titleText)
+        subtitleSelection++
+        subtitlePersonal = false
+        sharedSubtitleState = JSONObject().put("vtt", JSONObject.NULL).put("offset", 0)
         subs.clear(); subDelayMs = 0L; lastSubText = ""
         controls.subPref = i.getStringExtra("subPref") ?: ""
         controls.chatOn = i.getBooleanExtra("chatOn", true)
@@ -342,6 +395,9 @@ class PlayerActivity : Activity() {
 
     fun emitAction(action: String) = emit("action") { put("action", action) }
     fun emitSubPref(lang: String) = emit("subpref") { put("lang", lang) }
+    fun emitAudioChoice(language: String, label: String, index: Int) = emit("audio") {
+        put("state", JSONObject().put("language", language).put("label", label).put("index", index))
+    }
     private var endHandled = false
 
     /** The video reached its end: tell the page, and let the controls start the next episode if that's wanted. */

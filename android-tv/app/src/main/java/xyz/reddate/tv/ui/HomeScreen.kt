@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -305,8 +306,9 @@ fun HomeScreen(model: AppModel) {
     val requesters = remember { HashMap<String, FocusRequester>() }
     // One row at a time, as big as the space under the folded banner allows (Nuvio / Google TV style).
     val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
-    // Two rows fit under the compact details: each row is half of what's left (title, gap, poster).
-    val posterW = (((screenH - 14 - HERO_COMPACT_H) / 2f - 66f) / 1.5f).coerceIn(80f, 136f)
+    // Reserve space for row headings, focus rings and card captions. Rows can grow for larger text.
+    val rowHeight = ((screenH - 14 - HERO_COMPACT_H) / 2f).coerceAtLeast(180f)
+    val posterW = ((rowHeight - 96f) / 1.5f).coerceIn(80f, 136f)
     val cwW = (posterW * 1.5f * 16f / 9f).coerceAtMost(300f)
     val cwOffset0 = if (model.continueItems.isNotEmpty()) 1 else 0
     // Rows from addons start after Continue watching and My List (when there's anything in them).
@@ -344,7 +346,7 @@ fun HomeScreen(model: AppModel) {
         NoFollow { LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxWidth().weight(1f).padding(start = inset).clipToBounds(),
-            contentPadding = PaddingValues(top = 4.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(0.dp)
         ) {
             if (!model.rowsLoading && rows.isEmpty()) item(key = "empty") {
@@ -356,7 +358,7 @@ fun HomeScreen(model: AppModel) {
             }
             val cw = model.continueItems
             if (cw.isNotEmpty()) item(key = "continue") {
-                Column(if (inRows.value) Modifier.fillParentMaxHeight(0.5f) else Modifier.padding(bottom = 10.dp)) {
+                Column(Modifier.heightIn(min = rowHeight.dp).padding(bottom = 12.dp)) {
                     Row(Modifier.padding(start = 28.dp), verticalAlignment = Alignment.Bottom) {
                         SectionTitle("Continue watching")
                         Text("  ·  Hold OK for options", style = MaterialTheme.typography.labelMedium, color = C.muted, modifier = Modifier.padding(bottom = 11.dp))
@@ -370,21 +372,25 @@ fun HomeScreen(model: AppModel) {
                                 true
                             } else false
                         },
-                        contentPadding = PaddingValues(start = 28.dp, end = 40.dp),
+                        contentPadding = PaddingValues(start = 28.dp, end = 40.dp, top = 8.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        items(cw, key = { it.key }) { c -> ContinueCard(c, onFocus = { inRows.value = true; goRow(0) }, onLong = { model.dialog = Dlg.RemoveContinue(c) }, width = cwW.dp) { model.resume(c) } }
+                        items(cw, key = { it.key }) { c -> ContinueCard(c, onFocus = {
+                            inRows.value = true
+                            focused.value = Meta(c.show.ifEmpty { c.id }, c.type, c.name, c.art, c.art, "", c.subtitle, "")
+                            goRow(0)
+                        }, onLong = { model.dialog = Dlg.RemoveContinue(c) }, width = cwW.dp) { model.resume(c) } }
                     } }
                 }
             }
             val saved = model.myList.toList()
             if (saved.isNotEmpty()) item(key = "mylist") {
-                Column(if (inRows.value) Modifier.fillParentMaxHeight(0.5f) else Modifier.padding(bottom = 10.dp)) {
+                Column(Modifier.heightIn(min = rowHeight.dp).padding(bottom = 12.dp)) {
                     SectionTitle("My List", Modifier.padding(start = 28.dp))
                     Spacer(Modifier.height(10.dp))
-                    HorizontalPin { LazyRow(contentPadding = PaddingValues(start = 28.dp, end = 40.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    HorizontalPin { LazyRow(contentPadding = PaddingValues(start = 28.dp, end = 40.dp, top = 8.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(saved, key = { "ml:" + it.id }) { m ->
-                            PosterCard(m, onClick = { model.go(Screen.Title(m)) }, width = posterW.dp, onFocus = { inRows.value = true; focused.value = m; goRow(cwOffset0) })
+                            PosterCard(m, onClick = { model.go(Screen.Title(m)) }, width = posterW.dp, showTitle = true, onFocus = { inRows.value = true; focused.value = m; goRow(cwOffset0) })
                         }
                     } }
                 }
@@ -393,7 +399,7 @@ fun HomeScreen(model: AppModel) {
                 LaunchedEffect(rd.row.key) { model.ensureRow(rd) } // loads when it's composed (near the screen)
                 val items = rd.items.value
                 if (rd.failed.value) return@itemsIndexed
-                Column(if (inRows.value) Modifier.fillParentMaxHeight(0.5f) else Modifier.padding(bottom = 10.dp)) {
+                Column(Modifier.heightIn(min = rowHeight.dp).padding(bottom = 12.dp)) {
                     Row(Modifier.padding(start = 28.dp), verticalAlignment = Alignment.CenterVertically) {
                         val logo = rd.logo.value
                         if (logo.isNotEmpty()) {
@@ -412,7 +418,7 @@ fun HomeScreen(model: AppModel) {
                                 true
                             } else false
                         } else Modifier),
-                        contentPadding = PaddingValues(start = 28.dp, end = 40.dp),
+                        contentPadding = PaddingValues(start = 28.dp, end = 40.dp, top = 8.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         if (items.isEmpty()) {
@@ -422,7 +428,7 @@ fun HomeScreen(model: AppModel) {
                                 val k = "${rd.row.key}|${m.id}"
                                 val req = remember(k) { requesters.getOrPut(k) { FocusRequester() } }
                                 PosterCard(
-                                    m, onClick = { model.go(Screen.Title(m)) }, width = posterW.dp,
+                                    m, onClick = { model.go(Screen.Title(m)) }, width = posterW.dp, showTitle = true,
                                     onFocus = {
                                         goRow(rowIndex + cwOffset)
                                         inRows.value = true; focused.value = m; last[0] = rd.row.key; last[1] = m.id; model.homeLastRow = rd.row.key; model.homeLastPoster = m.id; mem.last = m.id

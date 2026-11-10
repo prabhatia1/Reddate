@@ -220,10 +220,10 @@ fun SearchScreen(model: AppModel) {
                     lazyItems(groups, key = { it.first }) { (title, metas) ->
                         Column {
                             SectionTitle("$title  ·  ${metas.size}")
-                            HorizontalPin { androidx.compose.foundation.lazy.LazyRow(state = rowStates.getOrPut(title) { androidx.compose.foundation.lazy.LazyListState() }, horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(end = 40.dp)) {
+                            HorizontalPin { androidx.compose.foundation.lazy.LazyRow(state = rowStates.getOrPut(title) { androidx.compose.foundation.lazy.LazyListState() }, horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(start = 8.dp, end = 40.dp, top = 12.dp, bottom = 8.dp)) {
                                 lazyItems(metas, key = { it.id }) { m ->
                                     val req = requesters.getOrPut(m.id) { FocusRequester() }
-                                    PosterCard(m, onClick = { model.searchLastId = m.id; kb?.hide(); model.go(Screen.Title(m)) }, modifier = Modifier.focusRequester(req))
+                                    PosterCard(m, onClick = { model.searchLastId = m.id; kb?.hide(); model.go(Screen.Title(m)) }, modifier = Modifier.focusRequester(req), showTitle = true)
                                 }
                             } }
                         }
@@ -391,16 +391,17 @@ fun JoinCodeDialog(model: AppModel) {
     var busy by remember { mutableStateOf(false) }
     val box = remember { FocusRequester() }
     fun go() {
-        if (code.filter { it.isLetterOrDigit() }.length < 6) { error = "Type the code your friend sent you."; return }
+        if (busy) return
+        if (code.isBlank()) { error = "Enter the 5-character code or invite link your friend sent you."; return }
         busy = true; error = ""
         model.joinCode(code) { msg -> busy = false; if (msg != null) error = msg }
     }
     Dialog(onDismissRequest = { model.dialog = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.width(520.dp).clip(RoundedCornerShape(16.dp)).background(C.paper2).padding(28.dp)) {
             Text("Someone invited you?", style = MaterialTheme.typography.headlineSmall, color = C.ink)
-            Text("Enter the code to join the party.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+            Text("Enter a 5-character code or paste an invite link. Phones, browsers and TVs join the same party.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(18.dp))
-            TvTextField(code, { code = it.uppercase().filter { c -> c.isLetterOrDigit() || c == '-' }.take(12); error = "" }, "ABCD-EFGH", ::go, Modifier.fillMaxWidth().focusRequester(box))
+            TvTextField(code, { code = it.take(2048); error = "" }, "A7B2C or invite link", ::go, Modifier.fillMaxWidth().focusRequester(box))
             if (error.isNotEmpty()) Text(error, color = C.accent, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 10.dp))
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -417,13 +418,17 @@ fun JoinCodeDialog(model: AppModel) {
 fun TogetherDialog(model: AppModel) {
     val first = remember { FocusRequester() }
     Dialog(onDismissRequest = { model.dialog = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(480.dp).clip(RoundedCornerShape(16.dp)).background(C.paper2).padding(28.dp)) {
+        Column(Modifier.width(520.dp).clip(RoundedCornerShape(16.dp)).background(C.paper2).padding(28.dp)) {
             Text("Watch together", style = MaterialTheme.typography.headlineSmall, color = C.ink)
             Text("Watch in sync with friends, on any screen.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+            Text("Starting a party generates a unique 5-character code to share.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 12.dp))
             Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                PillButton("Start a party", { model.dialog = null; model.together() }, primary = true, icon = Icons.Default.Share, modifier = Modifier.focusRequester(first))
-                PillButton("Join with a code", { model.dialog = Dlg.JoinCode })
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                PillButton("Start a party", {
+                    model.dialog = null
+                    model.together()
+                }, primary = true, icon = Icons.Default.Share, modifier = Modifier.fillMaxWidth().focusRequester(first))
+                PillButton("Join with a code or invite link", { model.dialog = Dlg.JoinCode }, modifier = Modifier.fillMaxWidth())
             }
         }
     }

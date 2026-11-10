@@ -5,6 +5,7 @@ import { useApp } from '../App';
 import { Player, OpenInfo, ChatPanel } from './Player';
 import { chat as chatStore, useChat } from '../chat';
 import { InviteProfiles } from './InviteProfiles';
+import { RoomCode } from './RoomCode';
 
 export function Watch({ joinCode }: { joinCode?: string }) {
     const { st, go, back, refresh, toast } = useApp();
@@ -63,7 +64,7 @@ export function Watch({ joinCode }: { joinCode?: string }) {
                     <>
                         <h2>{st.isGuest ? `In ${st.hostName || 'a'}’s party` : 'Your party'}</h2>
                         <p className="note" style={{ margin: '6px 0 14px' }}>{st.isGuest ? 'Waiting for the host to pick something to watch…' : 'Pick something to watch, and everyone here watches it with you.'}</p>
-                        {st.roomCode && <div className="code">{st.roomCode}</div>}
+                        {st.roomCode && <RoomCode code={st.roomCode} />}
                         {qr && <div className="qr" style={{ margin: '10px auto' }}><img alt="QR code to join" src={qr} width={160} height={160} /></div>}
                         {st.invite && <div className="note" style={{ overflowWrap: 'anywhere', marginBottom: 12 }}>{st.invite.replace(/^https?:\/\//, '')}</div>}
                         {!st.isGuest && <InviteProfiles />}
@@ -78,9 +79,11 @@ export function Watch({ joinCode }: { joinCode?: string }) {
                     <JoinPage code={joinCode} joining={joining} onJoin={joinNow} />
                 ) : (
                     <>
-                        <h2>No party right now</h2>
-                        <p className="note" style={{ margin: '8px 0 16px' }}>Start one from any title with “Watch together”, or join with a code.</p>
-                        <JoinBox onJoin={code => go('/join/' + code)} />
+                        <h2>Movie night starts here.</h2>
+                        <p className="note" style={{ margin: '8px 0 24px' }}>Create a room, share your code, and watch together on browsers and TVs.</p>
+                        <CreateBox />
+                        <div className="lobby-divider" aria-hidden="true">or</div>
+                        <JoinBox onJoin={code => go('/join/' + encodeURIComponent(code))} />
                     </>
                 )}
             </div>
@@ -91,7 +94,7 @@ export function Watch({ joinCode }: { joinCode?: string }) {
 /** A party link was opened: the code, the link to pass on (copy / share), and who you'll join as. */
 function JoinPage({ code, joining, onJoin }: { code: string; joining: boolean; onJoin: () => void }) {
     const { st, refresh, toast } = useApp();
-    const pretty = code.toUpperCase().replace(/^(.{4})(.+)$/, '$1-$2');
+    const pretty = code.length === 8 ? code.toUpperCase().replace(/^(.{4})(.+)$/, '$1-$2') : code.toUpperCase();
     const link = `${location.origin}/join/${code.toUpperCase()}`;
     const [copied, setCopied] = useState(false);
     async function copy() {
@@ -135,12 +138,35 @@ function JoinPage({ code, joining, onJoin }: { code: string; joining: boolean; o
 
 function JoinBox({ onJoin }: { onJoin: (c: string) => void }) {
     const [c, setC] = useState('');
+    const [error, setError] = useState('');
     return (
-        <form onSubmit={e => { e.preventDefault(); const code = c.replace(/[^A-Z0-9]/gi, '').toUpperCase(); if (code.length >= 6) onJoin(code); }} style={{ display: 'flex', gap: 8 }}>
-            <input className="input" placeholder="ABCD-EFGH" value={c} onChange={e => setC(e.target.value.toUpperCase())} maxLength={12} />
-            <button className="btn primary">Join</button>
+        <form className="lobby-join" onSubmit={e => { e.preventDefault(); const invite = (window as any).partyCode.parse(c); if (invite) onJoin(invite.code); else setError('Enter a 5-character room code or valid invite link.'); }}>
+            <label htmlFor="partyJoinInput">Join with a code or invite link</label>
+            <input id="partyJoinInput" className="input" placeholder="A7B2C or paste an invite link" autoComplete="off" autoCapitalize="characters" autoCorrect="off" spellCheck={false} enterKeyHint="go" aria-invalid={error ? true : undefined} aria-describedby={error ? 'partyJoinError' : undefined} value={c} onChange={e => { setC(e.target.value); setError(''); }} maxLength={2048} />
+            <button type="submit" className="btn">Join a room</button>
+            {error && <p id="partyJoinError" role="alert" className="err">{error}</p>}
         </form>
     );
+}
+
+function CreateBox() {
+    const { refresh } = useApp();
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+    return <form className="lobby-create" aria-busy={busy} onSubmit={async e => {
+        e.preventDefault(); if (busy) return;
+        setBusy(true); setError('');
+        try {
+            const result = await engine.call<{ ok: boolean; message?: string }>('together', {}, 25000);
+            if (!result?.ok) setError(result?.message || 'Could not start the party.');
+            else await refresh();
+        } catch (e: any) { setError(e.message || 'Could not start the party.'); }
+        finally { setBusy(false); }
+    }}>
+        <button type="submit" className="btn primary" disabled={busy}>{busy ? 'Creating…' : 'Create a room'}</button>
+        <p className="note">We’ll generate a 5-character code for you to share.</p>
+        {error && <p className="err" role="alert">{error}</p>}
+    </form>;
 }
 
 // Chat works in the lobby too, before anything is playing.

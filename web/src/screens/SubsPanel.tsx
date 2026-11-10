@@ -71,7 +71,7 @@ export function SubsPanel({ subs, loading, current, delay, onPick, onDelay, look
             <button className="subsp-back" onClick={() => setView('list')}><span aria-hidden>‹</span> Subtitles</button>
             <div className="subsp-body">
                 <div className="subsp-sample" style={lookVars(look)}><span>This is how they look</span></div>
-                <h3 className="subsp-h">Timing</h3>
+                <h3 className="subsp-h">Room subtitle timing</h3>
                 <div className="subsp-step">
                     <span>Sync</span>
                     <div>

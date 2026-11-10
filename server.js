@@ -54,7 +54,7 @@ const io = new Server(server, {
     // A TV busy starting a video can go quiet for a while; dropping its host for that ends the party. 20 s + 40 s.
     pingInterval: 20000, pingTimeout: 40000,
     // A chat picture is sent as one message: the default 1 MB limit closed the sender's connection (they were thrown out of the room).
-    maxHttpBufferSize: 4 * 1024 * 1024,
+    maxHttpBufferSize: 8 * 1024 * 1024,
     cors: { origin: (origin, cb) => cb(null, originAllowed(origin, null) ? origin || true : false), methods: ['GET', 'POST'] },
     allowRequest: (req, cb) => cb(null, originAllowed(req.headers.origin, req.headers.host))
 });
@@ -84,7 +84,7 @@ app.use((req, res, next) => {
 // The browser app (reddate.tv): the same server answers it, by host name. TVs keep using tv.reddate.xyz.
 // WEB_HOSTS is a comma-separated list; *.localhost hosts starting with "web." work for local development
 // (web.localhost:3090). The app is built into web/dist (npm run build in /web).
-const WEB_HOSTS = (process.env.WEB_HOSTS || 'reddate.tv,www.reddate.tv').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+const WEB_HOSTS = (process.env.WEB_HOSTS || 'reddate.xyz,www.reddate.xyz,reddate.tv,www.reddate.tv').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
 const isWebHost = req => {
     const h = String(req.hostname || '').toLowerCase();
     return WEB_HOSTS.includes(h) || /^web\.localhost$/.test(h);
@@ -124,6 +124,7 @@ app.use((req, res, next) => {
 // Render (and most hosts) put one proxy in front; trust it so req.ip is the
 // real client for per-IP rate limits.
 app.set('trust proxy', 1);
+require('./media-audio').registerMediaAudio(app);
 // The guest page for joining a watch party by code: the same app, trimmed down (see the `lean` class).
 const appPage = path.join(__dirname, 'public', 'index.html');
 const sitePage = name => path.join(__dirname, 'tv-site', name);
@@ -428,6 +429,8 @@ app.post('/media-info', express.json({ limit: '8kb' }), async (req, res) => {
 
 // roomId -> { videoState, users: Map<socketId, {username}>, poll, pollVotes: Map, addons }
 const rooms = new Map();
+const { createRoomCodes, registerRoomCodes } = require('./room-codes');
+const roomCodes = createRoomCodes(rooms);
 
 const MAX_ROOM_ID = 128;
 const MAX_USERNAME = 40;
@@ -437,6 +440,7 @@ const MAX_TEXT = 2000;       // one chat message
 const MAX_IMAGE = 3 * 1024 * 1024; // chat image as a data URL (client caps uploads at 2 MB)
 const MAX_STREAM_URL = 4096;
 const MAX_TITLE = 200;
+const MAX_SUBTITLE_BYTES = 5 * 1024 * 1024;
 
 // The room's video state as of right now (a playing video has moved on since its last update).
 function stateNow(room) {
@@ -458,12 +462,18 @@ function getRoom(roomId) {
             // memory only while the room exists. Addon URLs can carry private
             // tokens, so it is never logged or stored.
             addons: null,
+            subtitles: null,
+            audio: null,
+            audioRevision: 0,
+            settingsOwnerResume: null,
+            subtitleRevision: 0,
             watchEpoch: 0,
             // Voice room: socket id -> { username, muted, cam }. Audio/video go
             // peer-to-peer (WebRTC mesh); the server only relays signaling.
             voice: new Map()
         };
         rooms.set(roomId, room);
+        roomCodes.assign(roomId);
     }
     return room;
 }
@@ -579,7 +589,7 @@ function forgetDevice(socket) {
 
 // ---- Watch parties: rooms started by inviting your own profiles/devices ----
 // The person who invites is the host and the only one who controls playback (play, pause, seek,
-// what's on). Everyone picks their own subtitles and audio. No limit on size. If the host
+// what's on). Subtitle changes are shared; audio stays personal. No limit on size. If the host
 // drops out, they get HOST_GRACE_MS to come back before control passes to whoever joined first.
 // (No limit on how many people can be in a party.)
 const HOST_GRACE_MS = 60000;
@@ -617,7 +627,7 @@ function maybeRestoreHost(socket) {
 function startParty(socket, room) {
     if (room.party) return;
     room.party = { guestsCanPause: false, hostKeys: new Set([hostKeyOf(socket)]), host: socket.id, hostName: socket.data.profile || socket.data.username || 'Host', uid: socket.data.uid, device: socket.data.device, away: false, timer: null };
-    if (!room.restoredAt || Date.now() - room.restoredAt > 120000) io.to(socket.data.roomId).emit('system-message', { message: `👑 ${room.party.hostName} is hosting. Only they control playback; everyone picks their own subtitles.`, timestamp: Date.now() });
+    if (!room.restoredAt || Date.now() - room.restoredAt > 120000) io.to(socket.data.roomId).emit('system-message', { message: `👑 ${room.party.hostName} is hosting. Only they control playback; subtitle changes are shared with everyone.`, timestamp: Date.now() });
     broadcastParty(socket.data.roomId);
 }
 
@@ -693,6 +703,10 @@ function leaveRoom(socket, keep = false) {
     if (socket.data.embed) { if (room) leaveVoice(socket, room, roomId); return; } // the embedded Lounge was never in the list
     if (room) {
         room.users.delete(socket.id);
+        if (!room.party && room.videoState.settingsOwner === socket.id && room.users.size) {
+            room.videoState.settingsOwner = room.users.keys().next().value;
+            io.to(roomId).emit('room-settings-owner', { mediaId: room.videoState.mediaId, settingsOwner: room.videoState.settingsOwner });
+        }
         trail(roomId, `${username || '?'} left (${keep ? 'connection dropped' : 'on purpose'}); ${room.users.size} remain`);
         if (process.env.MAIL_MODE === 'log') console.log(`[room ${roomId}] - ${username} (${socket.id}) now ${room.users.size}`);
         room.pollVotes.delete(socket.id);
@@ -780,9 +794,11 @@ io.on('connection', (socket) => {
     });
 
     stats.observeOnline(io.engine.clientsCount);
-    socket.on('join-room', async ({ roomId, username, restore } = {}) => {
+    registerRoomCodes(socket, roomCodes, rooms);
+    socket.on('join-room', async ({ roomId, username, restore, requireExisting, resumeId } = {}) => {
         if (typeof roomId !== 'string' || !roomId || roomId.length > MAX_ROOM_ID) return;
         username = (typeof username === 'string' ? username : '').slice(0, MAX_USERNAME).trim() || 'Guest';
+        socket.data.resumeId = typeof resumeId === 'string' && /^[a-f0-9]{32}$/.test(resumeId) ? resumeId : null;
         // Room joins a minute from one address (a reconnect loop or a script making rooms), well above any real use.
         if (MAX_SOCKETS_PER_IP && !allowHit(`join:${socket.data.ip || socket.id}`, 90, 60000)) {
             socket.emit('system-message', { message: 'Too many room joins from this connection. Wait a minute and try again.', timestamp: Date.now() });
@@ -790,6 +806,7 @@ io.on('connection', (socket) => {
         }
 
         if (socket.data.helloP) await socket.data.helloP;
+        if (requireExisting && !rooms.has(roomId)) { socket.emit('join-denied', { reason: 'none' }); return; }
         // A party (or any room a signed-in person is in) takes only signed-in people with a profile name.
         const present = rooms.get(roomId);
         const gated = present && present.users.size && (present.party || [...present.users.keys()].some(id => {
@@ -821,7 +838,7 @@ io.on('connection', (socket) => {
             socket.data.roomId = roomId;
             socket.data.username = username;
             socket.join(roomId);
-            socket.emit('joined', { roomId });
+            socket.emit('joined', { roomId, code: roomCodes.assign(roomId) });
             socket.emit('user-count', peopleOf(existingRoom).length);
             socket.emit('room-users', peopleOf(existingRoom));
             if (existingRoom.voice.size) socket.emit('voice-members', [...existingRoom.voice].map(([id, m]) => ({ id, ...m })));
@@ -842,7 +859,12 @@ io.on('connection', (socket) => {
         if (!rooms.has(roomId)) stats.track('rooms');
         stats.track('joins');
         const room = getRoom(roomId);
-        if (rebuilt) { room.videoState = rebuilt; room.restoredAt = Date.now(); }
+        if (rebuilt) { room.videoState = { ...rebuilt, mediaId: crypto.randomBytes(12).toString('hex'), settingsOwner: socket.id }; room.restoredAt = Date.now(); }
+        if (rebuilt) room.settingsOwnerResume = socket.data.resumeId;
+        if (socket.data.resumeId && room.settingsOwnerResume === socket.data.resumeId) {
+            room.videoState.settingsOwner = socket.id;
+            io.to(roomId).emit('room-settings-owner', { mediaId: room.videoState.mediaId, settingsOwner: socket.id });
+        }
         if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
         socket.data.roomId = roomId;
         socket.data.username = username;
@@ -872,10 +894,12 @@ io.on('connection', (socket) => {
 
         // Bring the newcomer up to speed with the current video state.
         if (room.videoState.videoId || room.videoState.src) socket.emit('video-sync', stateNow(room));
+        if (room.subtitles) socket.emit('subtitles-updated', room.subtitles);
+        if (room.audio) socket.emit('audio-updated', room.audio);
         if (room.addons) socket.emit('addons-updated', { addons: room.addons, user: null });
         if (room.voice.size) socket.emit('voice-members', [...room.voice].map(([id, m]) => ({ id, ...m })));
         broadcastUserCount(roomId);
-        socket.emit('joined', { roomId });
+        socket.emit('joined', { roomId, code: roomCodes.assign(roomId) });
         if (room.pin) socket.emit('lounge-pin', room.pin);
         if (room.locked) socket.emit('lounge-state', { locked: true });
         if (room.party) socket.emit('party', partyInfo(room));
@@ -978,6 +1002,8 @@ io.on('connection', (socket) => {
         const title = typeof videoData.title === 'string' ? videoData.title.slice(0, MAX_TITLE) : '';
         const room = getRoom(roomId);
         room.videoState = {
+            mediaId: crypto.randomBytes(12).toString('hex'),
+            settingsOwner: socket.id,
             videoId: kind === 'yt' ? String(videoData.videoId || '') : '',
             src: kind === 'direct' ? src : '',
             kind,
@@ -987,10 +1013,40 @@ io.on('connection', (socket) => {
             currentTime: 0,
             lastUpdate: Date.now()
         };
+        room.subtitles = null;
+        room.audio = null;
+        room.audioRevision = 0;
+        room.settingsOwnerResume = socket.data.resumeId;
+        room.subtitleRevision = 0;
         // Which kind of video was started (counts only — never the title or link).
         stats.track(kind === 'yt' ? 'video_youtube' : room.videoState.content ? 'video_addon' : 'video_link');
         room.watchEpoch++;
         io.to(roomId).emit('video-loaded', { ...room.videoState, serverTime: room.videoState.lastUpdate, user: socket.data.username });
+    });
+
+    socket.on('set-subtitles', (payload = {}, ack) => {
+        const reply = data => { if (typeof ack === 'function') ack(data); };
+        const room = rooms.get(socket.data.roomId);
+        if (!room || !room.videoState.mediaId || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false, message: 'The video changed. Pick the subtitle again.' });
+        if (!(room.party ? isHostSocket(socket, room) : room.videoState.settingsOwner === socket.id)) return reply({ ok: true, personal: true });
+        const s = payload.state;
+        if (!s || (s.vtt !== null && typeof s.vtt !== 'string') || (s.vtt && Buffer.byteLength(s.vtt) > MAX_SUBTITLE_BYTES)) return reply({ ok: false, message: 'Subtitle file too large (max 5 MB).' });
+        const state = { vtt: s.vtt, key: String(s.key || '').slice(0, MAX_STREAM_URL), embeddedLang: String(s.embeddedLang || '').slice(0, 40), lang: String(s.lang || 'off').slice(0, 40), label: String(s.label || '').slice(0, MAX_TITLE), offset: Number.isFinite(s.offset) ? Math.max(-600, Math.min(600, s.offset)) : 0 };
+        room.subtitles = { mediaId: payload.mediaId, state, revision: ++room.subtitleRevision, sender: socket.id };
+        io.to(socket.data.roomId).emit('subtitles-updated', room.subtitles);
+        reply({ ok: true });
+    });
+
+    socket.on('set-audio', (payload = {}, ack) => {
+        const reply = data => { if (typeof ack === 'function') ack(data); };
+        const room = rooms.get(socket.data.roomId);
+        if (!room || payload.mediaId !== room.videoState.mediaId) return reply({ ok: false });
+        if (!(room.party ? isHostSocket(socket, room) : room.videoState.settingsOwner === socket.id)) return reply({ ok: true, personal: true });
+        const s = payload.state;
+        if (!s || typeof s.language !== 'string' || s.language.length > 40 || !Number.isInteger(s.index) || s.index < 0 || s.index > 200) return reply({ ok: false });
+        room.audio = { mediaId: payload.mediaId, revision: ++room.audioRevision, state: { language: s.language, label: String(s.label || '').slice(0, MAX_TITLE), index: s.index } };
+        io.to(socket.data.roomId).emit('audio-updated', room.audio);
+        reply({ ok: true });
     });
 
     // ---- Room addons (shared list of manifest URLs; memory only, never logged) ----

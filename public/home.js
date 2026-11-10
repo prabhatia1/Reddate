@@ -545,8 +545,9 @@ window.reddateHome = (function () {
     }
 
     function inviteLink() {
-        const id = window.reddateRoom && window.reddateRoom.roomId();
-        return id ? `${location.origin}/#room=${encodeURIComponent(id)}` : location.href;
+        const R = window.reddateRoom;
+        const id = R && (R.roomCode() || R.roomId());
+        return id ? `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(id)}` : location.href;
     }
 
     function showInvite() {

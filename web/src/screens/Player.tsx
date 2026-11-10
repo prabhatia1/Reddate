@@ -10,9 +10,11 @@ import { IBack, IChat, ISub, IAudio, IShare, IUsers, IPlay, IPause, IFull, IX, I
 import { Picker } from './Picker';
 import { SubsPanel, loadLook, saveLook, lookVars, SubLook } from './SubsPanel';
 import { InviteProfiles } from './InviteProfiles';
+import { RoomCode } from './RoomCode';
 import { YtVideo } from '../yt';
 import { chat as chatStore, useChat, ChatMsg } from '../chat';
 import { deviceName } from '../engine';
+import { audioLanguage, audioLabel } from '../audio';
 
 export interface OpenInfo { kind?: string; videoId?: string; url: string; sid: string; art: string; title: string; startMs: number; playWhenReady: boolean; subPref: string; chatOn: boolean }
 // iPhone and iPad ignore a page's volume slider (the hardware buttons own it), so there's no slider there.
@@ -56,8 +58,26 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     const [subUrl, setSubUrl] = useState('');
     const [look, setLook] = useState<SubLook>(loadLook);
     const [subDelay, setSubDelay] = useState(0);
+    const subSelection = useRef(0);
+    const subtitlePersonal = useRef(false);
+    const sharedSubRevision = useRef('');
+    const selectedSub = useRef<Json>({ vtt: null, key: '', lang: 'off', label: '', offset: 0 });
+    useEffect(() => () => { subSelection.current++; }, [open.sid]);
     const [cueText, setCueText] = useState('');
-    const [audioTracks, setAudioTracks] = useState<{ id: number; label: string; on: boolean }[]>([]);
+    const [audioTracks, setAudioTracks] = useState<{ id: number; label: string; lang: string; on: boolean }[]>([]);
+    const audioFallback = useRef<any>(null);
+    const audioGate = useRef<any>(null);
+    const audioChosen = useRef(false);
+    const audioPersonal = useRef(false);
+    const roomAudioRef = useRef<Json | null>(null);
+    roomAudioRef.current = info.roomAudio || null;
+    const settingsOwnerRef = useRef(false);
+    settingsOwnerRef.current = !!info.isSettingsOwner;
+    const reportedAudio = useRef('');
+    const audioSelection = useRef(0);
+    const audioRefresh = useRef<() => void>(() => {});
+    const [audioStatus, setAudioStatus] = useState('');
+    const [audioPending, setAudioPending] = useState(false);
     const [rate, setRate] = useState(1);
     const [fs, setFs] = useState(false);
     const [ask, setAsk] = useState<null | { title: string; body: string; yes: string; no: string; onYes: () => void; onNo?: () => void }>(null);
@@ -74,6 +94,27 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     const expectPlay = useRef<boolean | null>(null);
     const expectSeek = useRef<number | null>(null);
     const readySent = useRef(false);
+    async function selectAudio(id: number, lang: string, remember = true) {
+        if (remember) audioPersonal.current = true;
+        const selection = ++audioSelection.current;
+        const video = vref.current;
+        const fallback = audioFallback.current;
+        audioChosen.current = true;
+        setAudioStatus('Switching audio…'); setAudioPending(true);
+        try {
+            const h = hls.current;
+            if (h && h.audioTracks.length > 1) h.audioTrack = id;
+            else if (video?.audioTracks) {
+                for (let i = 0; i < video.audioTracks.length; i++) video.audioTracks[i].enabled = i === id;
+            } else if (fallback) await fallback.select(id);
+            if (vref.current !== video || selection !== audioSelection.current) return;
+            if (remember && lang) { try { localStorage.setItem('reddate-audio-lang', lang); } catch { /* no storage */ } }
+            audioRefresh.current();
+            setAudioStatus('');
+        } catch {
+            if (vref.current === video && selection === audioSelection.current) setAudioStatus('Could not switch audio. Try another language or stream.');
+        } finally { if (vref.current === video && selection === audioSelection.current) setAudioPending(false); }
+    }
     const stage = useRef<HTMLDivElement>(null);
     const hideT = useRef<number>();
     const popId = useRef(1);
@@ -95,12 +136,16 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     useEffect(() => {
         const v = isYt ? (vref.current = new YtVideo(ytWrap.current!, open.videoId!)) : vref.current!;
         let dead = false;
+        audioChosen.current = false;
+        audioPersonal.current = false; subtitlePersonal.current = false; reportedAudio.current = '';
+        audioSelection.current++;
+        setAudioStatus(''); setAudioPending(false); setAudioTracks([]);
         v.playbackRate = 1;
         const src = open.url;
         const isHls = !isYt && /\.m3u8($|\?)/i.test(src);
         if (!isYt) { v.preload = 'auto'; v.setAttribute('playsinline', ''); }
         if (isYt) { /* the YouTube player loads itself */ }
-        else if (isHls && Hls.isSupported() && !v.canPlayType('application/vnd.apple.mpegurl')) {
+        else if (isHls && Hls.isSupported() && !(v.canPlayType('application/vnd.apple.mpegurl') && v.audioTracks)) {
             const h = new Hls({ maxBufferLength: 40, enableWorker: true });
             hls.current = h;
             h.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) fail(d.details || 'HLS'); });
@@ -127,11 +172,12 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
             setDur(v.duration || 0);
             if (open.startMs > 0 && v.currentTime < 1) { expectSeek.current = open.startMs; v.currentTime = open.startMs / 1000; }
             refreshAudio();
+            if (audioFallback.current) audioFallback.current.load();
             // Phones only load the first bytes until someone presses play, and never say "can play":
             // the file's details arriving is enough to be ready (the play press then starts it).
             ready();
         };
-        const onCanPlay = () => { setBuffering(false); ready(); };
+        const onCanPlay = () => { setBuffering(!!audioGate.current?.buffering); ready(); };
         // A link that never answers counts as failed, so the next similar stream can be tried.
         const slowT = window.setTimeout(() => { if (!readySent.current) fail('TIMEOUT'); }, 25000);
         const onPlay = () => {
@@ -155,14 +201,20 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
             send({ type: 'seek', posMs: Math.round(v.currentTime * 1000), echo });
         };
         const onWaiting = () => setBuffering(true);
-        const onPlaying = () => { setBuffering(false); setNeedTap(false); };
+        const onPlaying = () => { setBuffering(!!audioGate.current?.buffering); setNeedTap(false); };
         const onEnded = () => { setPlaying(false); send({ type: 'ended', auto: false, posMs: Math.round(v.currentTime * 1000) }); };
         const onErr = () => { if (!hls.current) fail((isYt ? 'YT_ERR_' : 'MEDIA_ERR_') + (v.error ? v.error.code : '')); };
         const onVol = () => { /* nothing to tell the room */ };
         v.addEventListener('loadedmetadata', onMeta);
         v.addEventListener('canplay', onCanPlay);
-        v.addEventListener('play', onPlay);
-        v.addEventListener('pause', onPause);
+        if (!isYt) {
+            audioGate.current = (window as any).createPlaybackGate(v, {
+                onPlayback: (on: boolean) => on ? onPlay() : onPause(),
+                onBuffering: (on: boolean) => setBuffering(on),
+                onPlayError: () => setNeedTap(true)
+            });
+            if (!(v as any).audioTracks && !isHls) audioFallback.current = (window as any).createAudioFallback(v, open.url, refreshAudio);
+        } else { v.addEventListener('play', onPlay); v.addEventListener('pause', onPause); }
         v.addEventListener('seeked', onSeeked);
         v.addEventListener('waiting', onWaiting);
         v.addEventListener('playing', onPlaying);
@@ -173,20 +225,50 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
             setPos(v.currentTime); setDur(v.duration || 0);
             try { setBufEnd(v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0); } catch { /* ignore */ }
             setCueText(cueAt(cuesRef.current, v.currentTime - delayRef.current));
-            if (readySent.current && ++pings.current % 2 === 0) send({ type: 'tick', posMs: Math.round(v.currentTime * 1000), playing: !v.paused && !v.ended, buffering: v.readyState < 3 && !v.paused });
+            if (readySent.current && ++pings.current % 2 === 0) send({ type: 'tick', posMs: Math.round(v.currentTime * 1000), playing: !v.paused && !v.ended, buffering: !!audioGate.current?.buffering || v.seeking || v.readyState < 3 && !v.paused });
         }, 500);
         function refreshAudio() {
+            if (dead) return;
             const h = hls.current;
+            const fallback = audioFallback.current;
+            let tracks: { id: number; label: string; lang: string; on: boolean }[] = [];
             if (h && h.audioTracks && h.audioTracks.length > 1) {
-                setAudioTracks(h.audioTracks.map((t, i) => ({ id: i, label: t.name || t.lang || `Track ${i + 1}`, on: h.audioTrack === i })));
-                return;
+                tracks = h.audioTracks.map((t, i) => ({ id: i, label: audioLabel(t.lang || '', t.name, i), lang: audioLanguage(t.lang || ''), on: h.audioTrack === i }));
+            } else {
+                const at = (v as any).audioTracks;
+                if (at?.length) tracks = Array.from({ length: at.length }, (_, i) => ({ id: i, label: audioLabel(at[i].language, at[i].label, i), lang: audioLanguage(at[i].language), on: !!at[i].enabled }));
+                else if (fallback?.tracks.length) tracks = fallback.tracks.map((t: any, i: number) => ({ id: t.index, label: audioLabel(t.language, t.name, i), lang: audioLanguage(t.language), on: fallback.selected === t.index }));
             }
-            const at = (v as any).audioTracks;
-            if (at && at.length > 1) { setAudioTracks(Array.from({ length: at.length }, (_, i) => ({ id: i, label: at[i].label || at[i].language || `Track ${i + 1}`, on: !!at[i].enabled }))); return; }
-            setAudioTracks([]);
+            setAudioTracks(tracks);
+            setAudioStatus(fallback?.status || ''); setAudioPending(!!fallback?.pending);
+            const shared = roomAudioRef.current?.state;
+            if (shared && !audioPersonal.current && (!fallback || fallback.canAutoSelect)) {
+                const lang = audioLanguage(shared.language || '');
+                const match = tracks.find(t => t.lang === lang && t.label === shared.label) || (lang && tracks.find(t => t.lang === lang)) || (!lang && tracks[shared.index]);
+                if (match) { audioChosen.current = true; if (!match.on && !fallback?.pending) selectAudio(match.id, match.lang, false); }
+            }
+            let pref = ''; try { pref = audioLanguage(localStorage.getItem('reddate-audio-lang') || ''); } catch { /* no storage */ }
+            if (!shared && !audioChosen.current && pref && (!fallback || fallback.canAutoSelect)) {
+                const match = tracks.find(t => t.lang === pref) || tracks.find(t => t.lang && t.lang.split('-')[0] === pref.split('-')[0]);
+                if (match) { audioChosen.current = true; if (!match.on) selectAudio(match.id, match.lang, false); }
+            }
+            if (settingsOwnerRef.current && !fallback?.pending) {
+                const index = tracks.findIndex(t => t.on);
+                if (index >= 0) {
+                    const state = { language: tracks[index].lang, label: tracks[index].label, index };
+                    const signature = JSON.stringify(state);
+                    if (signature !== reportedAudio.current) { reportedAudio.current = signature; send({ type: 'audio', state }); }
+                }
+            }
         }
+        audioRefresh.current = refreshAudio;
+        const nativeTracks = (v as any).audioTracks;
+        if (nativeTracks?.addEventListener) ['addtrack', 'removetrack', 'change'].forEach(event => nativeTracks.addEventListener(event, refreshAudio));
         return () => {
             dead = true;
+            audioGate.current?.destroy(); audioGate.current = null;
+            audioFallback.current?.destroy(); audioFallback.current = null;
+            if (nativeTracks?.removeEventListener) ['addtrack', 'removetrack', 'change'].forEach(event => nativeTracks.removeEventListener(event, refreshAudio));
             window.clearInterval(tickT);
             window.clearTimeout(slowT);
             v.removeEventListener('loadedmetadata', onMeta); v.removeEventListener('canplay', onCanPlay);
@@ -248,8 +330,8 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
                 const v = vref.current;
                 if (!v) return;
                 switch (c.cmd) {
-                    case 'play': expectPlay.current = v.paused ? true : null; v.play().catch(() => setNeedTap(true)); break;
-                    case 'pause': expectPlay.current = v.paused ? null : false; v.pause(); break;
+                    case 'play': expectPlay.current = v.paused ? true : null; if (audioGate.current) { if (!audioGate.current.play()) expectPlay.current = null; } else v.play().catch(() => setNeedTap(true)); break;
+                    case 'pause': expectPlay.current = v.paused ? null : false; if (audioGate.current) { if (!audioGate.current.pause()) expectPlay.current = null; } else v.pause(); break;
                     case 'seek': expectSeek.current = c.ms; window.setTimeout(() => { if (expectSeek.current === c.ms) expectSeek.current = null; }, 3000); v.currentTime = c.ms / 1000; break;
                     case 'rate': v.playbackRate = Math.min(1.25, Math.max(0.8, c.r || 1)); break;
                     case 'stop': onClose(); break;
@@ -303,7 +385,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
         window.setTimeout(() => setPops(l => l.filter(p => p.id !== id)), 5500);
     }
 
-    useEffect(() => { const v = vref.current; if (v) { v.volume = volume; v.muted = muted; } try { localStorage.setItem('rd-vol', String(volume)); } catch { /* fine */ } }, [volume, muted]);
+    useEffect(() => { const v = vref.current; if (v) { v.volume = volume; if (audioFallback.current) audioFallback.current.setMuted(muted); else v.muted = muted; } try { localStorage.setItem('rd-vol', String(volume)); } catch { /* fine */ } }, [volume, muted, open.sid]);
     // A stream whose sound the browser can't decode (Dolby Digital+, DTS…) plays picture only: say so.
     useEffect(() => {
         if (!playing) return;
@@ -339,7 +421,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
             else if (e.key === 'ArrowLeft') seekBy(-10);
             else if (e.key === 'f') toggleFs();
             else if (e.key === 'c') setPanel(p => (p === 'chat' ? '' : 'chat'));
-            else if (e.key === 'm') v.muted = !v.muted;
+            else if (e.key === 'm') setMuted(m => !m);
             else if (e.key === 'Escape') { if (panelRef.current) setPanel(''); }
         };
         window.addEventListener('keydown', onKey);
@@ -387,8 +469,15 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
     }
 
     // ---- subtitles ----
+    useEffect(() => { audioRefresh.current(); }, [info.roomAudio?.mediaId, info.roomAudio?.revision, info.isSettingsOwner]);
     async function useSub(s: Json | null) {
-        if (!s) { setCues([]); setSubLabel(''); setSubUrl(''); send({ type: 'subpref', lang: 'off' }); return; }
+        subtitlePersonal.current = true;
+        const selection = ++subSelection.current;
+        if (!s) {
+            selectedSub.current = { vtt: null, key: '', lang: 'off', label: '', offset: 0 };
+            setCues([]); setSubLabel(''); setSubUrl(''); setSubDelay(0);
+            send({ type: 'subpref', lang: 'off' }); send({ type: 'subtitle', state: selectedSub.current }); return;
+        }
         try {
             const r = await fetch(s.url);
             if (!r.ok) throw new Error('bad');
@@ -396,22 +485,67 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
             if (buf.byteLength > MAX_SUB_BYTES) throw new Error('big');
             let text = new TextDecoder('utf-8').decode(buf);
             if (text.includes('�')) text = new TextDecoder('windows-1252').decode(buf);
+            if (selection !== subSelection.current) return;
             const c = parseSubs(text);
             if (!c.length) throw new Error('empty');
             setCues(c); setSubLabel(`${s.label || s.lang}${s.name ? ' · ' + s.name : ''}`); setSubUrl(String(s.url || ''));
+            setSubDelay(0);
+            selectedSub.current = { vtt: text, key: String(s.url || ''), lang: String(s.lang || 'und'), label: `${s.label || s.lang}${s.name ? ' · ' + s.name : ''}`, offset: 0 };
             send({ type: 'subpref', lang: String(s.lang || '') });
-        } catch { toast('That subtitle couldn’t be loaded here. Try another.'); }
+            send({ type: 'subtitle', state: selectedSub.current });
+        } catch { if (selection === subSelection.current) toast('That subtitle couldn’t be loaded here. Try another.'); }
     }
+    function changeSubDelay(delay: number) {
+        subtitlePersonal.current = true;
+        setSubDelay(delay);
+        selectedSub.current = { ...selectedSub.current, offset: delay };
+        send({ type: 'subtitle', state: selectedSub.current });
+    }
+    useEffect(() => {
+        const shared = info.roomSubtitle;
+        if (!shared?.state) return;
+        const revision = `${shared.mediaId}:${shared.revision}`;
+        if (revision === sharedSubRevision.current) return;
+        sharedSubRevision.current = revision;
+        if (subtitlePersonal.current && !info.isSettingsOwner) return;
+        if (!shared.own) subSelection.current++;
+        const s = shared.state;
+        selectedSub.current = s;
+        const v = vref.current;
+        const h = hls.current;
+        const syncEmbedded = () => {
+            const lang = s.embeddedLang ? audioLanguage(s.embeddedLang) : '';
+            if (h) h.subtitleTrack = lang ? h.subtitleTracks.findIndex(t => audioLanguage(t.lang || '') === lang) : -1;
+            for (const t of Array.from(v?.textTracks || []) as TextTrack[]) {
+                if (t.kind !== 'subtitles' && t.kind !== 'captions') continue;
+                t.mode = lang && audioLanguage(t.language) === lang ? 'showing' : 'disabled';
+                if (t.mode === 'showing') for (const cue of Array.from(t.cues || []) as any[]) {
+                    if (!cue._base) cue._base = [cue.startTime, cue.endTime];
+                    cue.startTime = Math.max(0, cue._base[0] + (Number(s.offset) || 0));
+                    cue.endTime = Math.max(0, cue._base[1] + (Number(s.offset) || 0));
+                }
+            }
+        };
+        syncEmbedded();
+        v?.textTracks?.addEventListener('addtrack', syncEmbedded);
+        h?.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, syncEmbedded);
+        setCues(s.vtt ? parseSubs(s.vtt) : []); setSubUrl(s.vtt ? String(s.key || '') : s.embeddedLang ? `embedded:${s.embeddedLang}` : '');
+        setSubLabel(s.vtt || s.embeddedLang ? String(s.label || s.lang || 'Room subtitle') : ''); setSubDelay(Number(s.offset) || 0);
+        return () => {
+            v?.textTracks?.removeEventListener('addtrack', syncEmbedded);
+            h?.off(Hls.Events.SUBTITLE_TRACKS_UPDATED, syncEmbedded);
+        }
+    }, [info.roomSubtitle?.mediaId, info.roomSubtitle?.revision]);
     // Pick the remembered language when the list arrives.
     const subsPicked = useRef(false);
     useEffect(() => {
-        if (subsPicked.current) return;
+        if (subsPicked.current || info.live || info.roomSubtitle) return;
         const subs: Json[] = info.subs || [];
         const pref: string = info.subPref || open.subPref || '';
         if (!subs.length || !pref || pref === 'off') return;
         const m = subs.find(s => String(s.lang).toLowerCase().startsWith(pref.toLowerCase().slice(0, 2)));
         if (m) { subsPicked.current = true; useSub(m); }
-    }, [info.subs, info.subPref]);
+    }, [info.subs, info.subPref, info.live, info.roomSubtitle]);
 
     // ---- chat ----
     function sendChat(text: string) {
@@ -528,7 +662,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
                         {iAmHostNow() && <button className="ibtn" onClick={() => setPicker(true)}><ISwap width={18} height={18} />Change video</button>}
                         {info.hostOnly && !iAmHost && <button className="ibtn" onClick={() => send({ type: 'action', action: 'sync' })}>Sync to {String(info.hostName || 'host').slice(0, 14)}</button>}
                         {!isYt && <button className="ibtn" onClick={() => setPanel(panel === 'subs' ? '' : 'subs')}><ISub width={18} height={18} />Subtitles</button>}
-                        {!isYt && audioTracks.length > 1 && <button className="ibtn" onClick={() => setPanel(panel === 'audio' ? '' : 'audio')}><IAudio width={18} height={18} />Audio</button>}
+                        {!isYt && <button className="ibtn" onClick={() => { setPanel(panel === 'audio' ? '' : 'audio'); audioFallback.current?.load().then(() => audioRefresh.current()); }}><IAudio width={18} height={18} />Language</button>}
                         <button className="ibtn" onClick={() => setPanel(panel === 'invite' ? '' : 'invite')}><IShare width={18} height={18} />Invite</button>
                         <button className="ibtn" onClick={() => setPanel(panel === 'people' ? '' : 'people')}><IUsers width={18} height={18} />Who’s here</button>
                         <button className="ibtn" onClick={() => { if (!info.live && panel !== 'chat') engine.call('goLive').catch(() => {}); setPanel(panel === 'chat' ? '' : 'chat'); setUnread(0); }}><IChat width={18} height={18} />{loungeUrl ? 'Lounge' : 'Chat'}{unread > 0 && <span className="dot">{unread}</span>}</button>
@@ -555,7 +689,7 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
                             {info.room ? (
                                 <>
                                     <div className="note">PARTY CODE · ANYONE WITH REDDATE CAN JOIN</div>
-                                    <div className="code">{info.room}</div>
+                                    <RoomCode code={info.room} />
                                     {qr && <div className="qr"><img alt="QR code to join" src={qr} width={180} height={180} /></div>}
                                     <div className="note">Scan to join from a phone or computer</div>
                                     <div className="note" style={{ margin: '10px 0 2px' }}>Or go to</div>
@@ -590,18 +724,15 @@ export function Player({ open, onClose }: { open: OpenInfo; onClose: (immediate?
                     )}
                     {panel === 'subs' && (
                         <SubsPanel subs={info.subs || []} loading={!!info.subsLoading} current={subUrl} delay={subDelay}
-                            onPick={useSub} onDelay={setSubDelay} look={look} onLook={patch => setLook(l => { const n = { ...l, ...patch }; saveLook(n); return n; })} />
+                            onPick={useSub} onDelay={changeSubDelay} look={look} onLook={patch => setLook(l => { const n = { ...l, ...patch }; saveLook(n); return n; })} />
                     )}
                     {panel === 'audio' && (
                         <div className="body">
-                            {audioTracks.length === 0 && <p className="note">This video has one audio track. Browsers can’t read the audio tracks inside MKV files; the TV app can.</p>}
+                            <p className="note">Your audio language applies to you and is remembered for the next video.</p>
+                            {audioStatus && <p className="note" role="status">{audioStatus}</p>}
+                            {audioTracks.length < 2 && <p className="note">Switching languages requires multiple audio tracks in the source video.</p>}
                             {audioTracks.map(t => (
-                                <button key={t.id} className={'opt' + (t.on ? ' on' : '')} onClick={() => {
-                                    const h = hls.current; const v = vref.current as any;
-                                    if (h && h.audioTracks.length > 1) h.audioTrack = t.id;
-                                    else if (v.audioTracks) for (let i = 0; i < v.audioTracks.length; i++) v.audioTracks[i].enabled = i === t.id;
-                                    setAudioTracks(l => l.map(x => ({ ...x, on: x.id === t.id })));
-                                }}>{t.label}</button>
+                                <button key={t.id} className={'opt' + (t.on ? ' on' : '')} aria-pressed={t.on} aria-busy={audioPending} onClick={() => selectAudio(t.id, t.lang)}>{t.label}</button>
                             ))}
                         </div>
                     )}

@@ -4,6 +4,26 @@
 
 <h1 align="center">Reddate</h1>
 
+Party invitations use five letters or numbers, for example `A7B2C`. Creating a
+party automatically generates a unique code. Use **Copy room code** to share it.
+Browsers and Android TVs join by typing that code or pasting an invite link. Previous
+eight-character codes and links still work. Joining waits for server confirmation;
+invalid codes, closed rooms and account/profile restrictions show an error.
+
+`reddate.xyz`, `tv.reddate.xyz` and Android TV must use the same TV server process
+to share rooms. This branch serves the browser app on `reddate.xyz` by default.
+If `reddate.xyz` continues running the `main` branch, its lobby sends new parties
+to `https://tv.reddate.xyz`; set `SHARED_PARTY_URL` there for another shared server.
+Keep the Android app's start URL pointed at that same service. Room state is in
+memory, so independent deployments do not share rooms.
+
+The browser Language menu supports live native/HLS track switching and the
+embedded MP4/MKV audio fallback from `main`. Install FFmpeg and ffprobe on the TV
+server for that fallback, or set `FFMPEG_PATH` and `FFPROBE_PATH`. Android TV
+switches tracks through its native player. Both remember the viewer's language
+for later videos, preserve playback position, and keep the choice local to that
+viewer. Temporary audio buffering holds only that viewer's picture.
+
 <p align="center">
   <b>Movie night, in sync.</b><br>
   An open-source watch-party app for Android TV, phones and browsers.<br>
@@ -31,7 +51,8 @@
 
 ## What it is
 
-- **Watch together.** Start a room from your TV, share a code or a QR, and everyone's player stays in step. A host controls playback; guests choose their own subtitles.
+- **Watch together.** Start a room from your TV and share its code or QR. New viewers join the current video at the party's live position, using the host's current audio and subtitles. Viewers can then choose another audio language, turn subtitles off, or adjust subtitle timing on their own device. Their choices do not change anyone else's player. Shared starting settings are held in memory until the video changes or the room closes.
+- **Resume on refresh.** A browser tab remembers its joined room and name. Refreshing the classic page or browser app returns directly to the room. Leaving the room explicitly clears that tab's saved session.
 - **A TV app that feels native.** Home with Top 10 rows per streaming service, Continue watching, big posters, a remote-friendly layout and a stream picker that shows speed and device support before you press play.
 - **You bring the sources.** Reddate speaks the Stremio addon format, so the catalogs and stream sources you already use work. Reddate hosts no video.
 

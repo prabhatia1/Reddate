@@ -35,6 +35,19 @@ class SubtitleEngine {
 
     fun clear() { cues = emptyList(); url = "" }
 
+    fun useText(text: String, key: String): Boolean {
+        if (text.toByteArray(Charsets.UTF_8).size > 5 * 1024 * 1024) return false
+        val parsed = parse(text)
+        if (parsed.isEmpty()) return false
+        cues = parsed; url = key
+        return true
+    }
+
+    fun asVtt(): String {
+        fun timestamp(ms: Long): String = String.format(java.util.Locale.ROOT, "%02d:%02d:%02d.%03d", ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms % 1000)
+        return "WEBVTT\n\n" + cues.joinToString("\n\n") { "${timestamp(it.start)} --> ${timestamp(it.end)}\n${it.text}" }
+    }
+
     /** The text to show at [posMs] (already shifted by the delay), or "". */
     fun textAt(posMs: Long): String {
         val list = cues

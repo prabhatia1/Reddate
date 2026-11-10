@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -66,8 +67,14 @@ private val focusGlow = androidx.tv.material3.Glow(elevationColor = Color(0x59F6
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-fun PosterCard(meta: Meta, onClick: () -> Unit, onFocus: () -> Unit = {}, width: Dp = 124.dp, modifier: Modifier = Modifier) {
-    if (meta.rank > 0) { RankedPoster(meta, onClick, onFocus, width, modifier); return }
+fun PosterCard(meta: Meta, onClick: () -> Unit, onFocus: () -> Unit = {}, width: Dp = 124.dp, modifier: Modifier = Modifier, showTitle: Boolean = false) {
+    if (meta.rank > 0) {
+        Column(Modifier.width(width + if (meta.rank >= 10) 78.dp else 54.dp)) {
+            RankedPoster(meta, onClick, onFocus, width, modifier)
+            if (showTitle) PosterCaption(meta.name)
+        }
+        return
+    }
     // A YouTube channel: its round picture, the name and subscribers under it.
     if (meta.id.startsWith("ytc:")) {
         val d = width * 1.3f
@@ -98,7 +105,14 @@ fun PosterCard(meta: Meta, onClick: () -> Unit, onFocus: () -> Unit = {}, width:
             border = CardDefaults.border(focusedBorder = Border(focusRing, shape = RoundedCornerShape(10.dp))),
             colors = CardDefaults.colors(containerColor = C.paper3)
         ) { PosterFace(meta) }
+        if (showTitle) PosterCaption(meta.name)
     }
+}
+
+@Composable
+private fun PosterCaption(name: String) {
+    Text(name, style = MaterialTheme.typography.titleSmall, color = C.ink, maxLines = 2, overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(top = 8.dp).heightIn(min = 40.dp))
 }
 
 /** The picture, or (when an addon sent none) the title on a plain card. */
@@ -509,7 +523,7 @@ fun ContinueCard(c: CwItem, onFocus: () -> Unit, onLong: () -> Unit = {}, width:
             }
         }
         Spacer(Modifier.height(8.dp))
-        Text(c.name, style = MaterialTheme.typography.titleSmall, color = C.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(c.name, style = MaterialTheme.typography.titleSmall, color = C.ink, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.heightIn(min = 40.dp))
         Text(c.subtitle, style = MaterialTheme.typography.bodySmall, color = C.muted, maxLines = 1)
     }
 }

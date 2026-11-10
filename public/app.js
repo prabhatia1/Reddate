@@ -16,8 +16,8 @@ const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 function randomRoomId() {
     return Array.from(crypto.getRandomValues(new Uint8Array(8)), b => CODE_CHARS[b % CODE_CHARS.length]).join('');
 }
-const prettyCode = id => (/^[A-Z2-9]{8}$/.test(id || '') ? `${id.slice(0, 4)}-${id.slice(4)}` : '');
-const parseCode = text => String(text || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const prettyCode = id => id === roomId && roomCode ? roomCode : (/^[A-Z0-9]{5}$/.test(id || '') ? id : (/^[A-Z2-9]{8}$/.test(id || '') ? `${id.slice(0, 4)}-${id.slice(4)}` : ''));
+const parseCode = text => window.partyCode.parse(text)?.code || '';
 
 // ---------------- Fragment parsing ----------------
 // (Older invite links also carried "&k=…"; it's ignored now.)
@@ -29,6 +29,16 @@ function parseFragment() {
 // ---------------- App state ----------------
 let socket = null;
 let roomId = null;
+let roomCode = '', requireExistingRoom = false;
+let joinWaiters = [];
+function finishJoin(result) { const pending = joinWaiters; joinWaiters = []; pending.forEach(f => f(result)); }
+function waitForJoin() {
+    return new Promise(resolve => {
+        const done = result => { clearTimeout(timer); resolve(result); };
+        const timer = setTimeout(() => { joinWaiters = joinWaiters.filter(f => f !== done); resolve({ ok: false, message: 'Could not join. Check your connection and try again.' }); }, 15000);
+        joinWaiters.push(done);
+    });
+}
 let currentUser = 'Guest';
 
 let vp = null;              // unified player adapter (YouTube or HTML5 <video>)
@@ -124,6 +134,7 @@ function goLive() {
 
 // Join (or create) a room and show the player. `then` runs once we're in. opts.lazy: just watching alone, no room yet.
 function enterRoom(name, id, then, opts) {
+    requireExistingRoom = !!opts?.requireExisting;
     const lazy = !!(opts && opts.lazy) && !inRoom && !id;
     if (inRoom && !roomLive && !(opts && opts.lazy)) {
         if (id && id !== roomId) { inRoom = false; roomLive = true; } // joining someone else's room: the unshared solo one is simply dropped
@@ -133,6 +144,7 @@ function enterRoom(name, id, then, opts) {
     rememberName(currentUser);
     const switching = inRoom && id && id !== roomId; // e.g. accepting an invite from another room
     if (switching) { destroyPlayer(); setNowPlaying(''); party = null; }
+    if (switching) roomCode = '';
     roomId = id || roomId || randomRoomId();
     if (!lazy && location.hash !== `#room=${encodeURIComponent(roomId)}`) history.replaceState(null, '', `${location.pathname}${location.search}#room=${encodeURIComponent(roomId)}`);
     if (then) afterJoin.push(then);
@@ -140,6 +152,7 @@ function enterRoom(name, id, then, opts) {
     const codeEl = document.getElementById('roomCode');
     codeEl.textContent = !lazy && prettyCode(roomId) ? `Room ${prettyCode(roomId)}` : '';
     codeEl.hidden = lazy || !prettyCode(roomId);
+    renderShareCode();
     showScreen('room');
     if (!inRoom || switching) {
         inRoom = true;
@@ -171,19 +184,32 @@ window.reddateRoom = {
 
 // Phones and computers open on the lobby: pick a name, then create a room or join one by its code.
 // Invite links open the same card as "Join room". (The TV app opens on Home instead.)
-usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') lobbyBtn.click(); });
-lobbyBtn.addEventListener('click', () => {
-    const name = usernameInput.value.trim();
-    if (!name) { usernameInput.focus(); return; }
-    enterRoom(name, existing.roomId || null);
-});
 const codeInput = document.getElementById('codeInput');
+const codeBtn = document.getElementById('codeBtn');
+const lobbyError = document.getElementById('lobbyError');
+function clearLobbyError() {
+    lobbyError.hidden = true;
+    lobbyError.textContent = '';
+    usernameInput.removeAttribute('aria-invalid');
+    codeInput.removeAttribute('aria-invalid');
+}
+function showLobbyError(message, input) {
+    lobbyError.textContent = message;
+    lobbyError.hidden = false;
+    if (input) { input.setAttribute('aria-invalid', 'true'); input.focus(); }
+}
+usernameInput.addEventListener('input', clearLobbyError);
+codeInput.addEventListener('input', clearLobbyError);
+usernameInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); (codeInput.value.trim() && !existing.roomId ? codeBtn : lobbyBtn).click(); }
+});
+lobbyBtn.addEventListener('click', () => enterFromLobby(false));
+codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); codeBtn.click(); } });
 // Is anyone in a room with this code right now? (Typing a wrong code shouldn't quietly create an empty room.)
 function roomExists(code) {
     return new Promise(resolve => {
-        if (!socket || !socket.connected) { resolve(true); return; } // can't check: let them try
-        const t = setTimeout(() => resolve(true), 3000);
-        socket.emit('room-exists', { roomId: code }, yes => { clearTimeout(t); resolve(!!yes); });
+        if (!socket || !socket.connected) { resolve({ ok: false, message: 'Connecting. Try again in a moment.' }); return; }
+        socket.timeout(8000).emit('resolve-room', { code }, (error, result) => resolve(error ? { ok: false, message: 'Could not check the code. Try again.' } : result));
     });
 }
 // Joining a watch party needs an account and a profile name.
@@ -196,30 +222,59 @@ function askToSignIn(msg) {
     const A = window.reddateAccount;
     if (A && A.open) A.open();
 }
-async function joinByCode() {
-    const code = parseCode(codeInput.value);
-    if (code.length < 6) { showToast('Type the room code your friend sent you'); codeInput.focus(); return; }
+async function enterFromLobby(joining) {
+    if (lobbyBtn.disabled || codeBtn.disabled) return;
+    clearLobbyError();
+    const code = joining ? parseCode(codeInput.value) : '';
+    if (joining && !code) { showLobbyError('Enter a 5-character room code or a valid invite link.', codeInput); return; }
     let name = usernameInput.value.trim();
-    if (LEAN) {
+    if (joining && LEAN) {
         name = accountName();
         if (!name) { askToSignIn('Sign in with your Reddate account and pick a profile to join'); return; }
-    } else if (!name) { showToast('Pick a username first'); usernameInput.focus(); return; }
-    if (!(await roomExists(code))) { showToast('No party with that code right now. Check it and try again.'); codeInput.focus(); return; }
-    enterRoom(name, code);
+    } else if (!name) { showLobbyError('Enter your name to create or join a room.', usernameInput); return; }
+    const actionBtn = joining ? codeBtn : lobbyBtn;
+    const label = actionBtn.textContent;
+    actionBtn.textContent = joining || existing.roomId ? 'Joining…' : 'Creating…';
+    lobbyBtn.disabled = codeBtn.disabled = true;
+    lobbyEl.setAttribute('aria-busy', 'true');
+    try {
+        let id = existing.roomId || null;
+        if (joining) {
+            const found = await roomExists(code);
+            if (!found?.ok) { showLobbyError(found?.message || 'That party has ended.', codeInput); return; }
+            id = found.roomId;
+        }
+        const joined = waitForJoin();
+        enterRoom(name, id, null, { requireExisting: !!id });
+        const result = await joined;
+        if (!result?.ok) { inRoom = false; showScreen('lobby'); showLobbyError(result?.message || 'Could not join the room. Try again.'); }
+    } catch (error) {
+        showLobbyError(error.message || 'Could not join the room. Try again.');
+    } finally {
+        actionBtn.textContent = label;
+        lobbyBtn.disabled = codeBtn.disabled = false;
+        lobbyEl.removeAttribute('aria-busy');
+    }
 }
+function joinByCode() { return enterFromLobby(true); }
 window.reddateJoinByCode = async text => {
     const code = parseCode(text);
-    if (code.length < 6) return { ok: false, message: 'That code looks too short.' };
-    if (!(await roomExists(code))) return { ok: false, message: 'No party with that code right now. Check it and try again.' };
-    enterRoom(savedName() || 'Guest', code);
-    return { ok: true };
+    if (!code) return { ok: false, message: 'Enter a 5-character room code or invite link.' };
+    const found = await roomExists(code);
+    if (!found?.ok) return found || { ok: false, message: 'That party has ended.' };
+    if (inRoom && roomLive && roomId === found.roomId) return { ok: true };
+    const result = waitForJoin();
+    enterRoom(savedName() || 'Guest', found.roomId, null, { requireExisting: true });
+    // Joining a room already joined needs no new server event.
+    return result;
 };
-document.getElementById('codeBtn').addEventListener('click', joinByCode);
+codeBtn.addEventListener('click', joinByCode);
 if (LEAN) {
     // The guest page: join only, with your account and profile.
-    lobbyBtn.hidden = true;
+    document.getElementById('lobbyCreate').hidden = true;
     const f = usernameInput.closest('.field'); if (f) f.hidden = true;
-    const or = document.querySelector('.lobby-or'); if (or) or.textContent = 'Join a watch party with its code';
+    document.querySelector('.lobby-or').hidden = true;
+    document.getElementById('lobbyTitle').textContent = LOUNGE ? 'Join the lounge.' : 'Join your friends.';
     if (leanCode) codeInput.value = prettyCode(leanCode) || leanCode;
     const tag = document.getElementById('lobbyTagline'); if (tag) tag.textContent = 'Sign in with your Reddate account and pick a profile to join.';
     document.title = LOUNGE ? 'Lounge · Reddate' : 'Join a watch party · Reddate';
@@ -296,8 +351,13 @@ function startApp() {
     });
     socket.on('vault-changed', () => { if (window.reddateAccount && window.reddateAccount.refresh) window.reddateAccount.refresh(); });
     socket.on('join-denied', d => {
+        const messages = { locked: 'This room is locked by the host.', none: 'No party with that code right now.', code: d?.message || 'That room code is already in use.', busy: `${d?.name || 'That profile'} is already in this party on another device. Pick a different profile.`, profile: 'Pick a profile first, then join again.', signin: 'Sign in to join this party.' };
+        finishJoin({ ok: false, message: messages[d?.reason] || 'Could not join the party.' });
+        afterJoin = [];
+        requireExistingRoom = false;
         inRoom = false;
         showScreen('lobby');
+        if (d?.reason === 'code') { roomId = null; roomCode = ''; showToast(messages.code); return; }
         if (d && d.reason === 'locked') { showToast('This room is locked by the host'); return; }
         if (d && d.reason === 'none') { showToast('No party with that code right now.'); return; }
         if (d && d.reason === 'busy') {
@@ -313,8 +373,17 @@ function startApp() {
         document.getElementById('connectionText').textContent = 'Disconnected';
     });
 
-    socket.on('joined', () => {
-        addSystemMessage('Connected. Share the invite link to bring someone in.');
+    socket.on('joined', data => {
+        window.reddateBrowserSession.save({ roomId: data.roomId, roomCode: data.code, name: currentUser });
+        roomCode = data.code || roomCode;
+        requireExistingRoom = false;
+        const codeEl = document.getElementById('roomCode');
+        codeEl.textContent = roomCode ? `Room ${roomCode}` : '';
+        codeEl.hidden = !roomCode;
+        renderShareCode();
+        finishJoin({ ok: true });
+        if (window.reddateNativeInfo) window.reddateNativeInfo();
+        addSystemMessage('Connected. Share the room code or invite link to bring someone in.');
         setTimeout(flushChat, 300); // anything typed while we were away
         const q = afterJoin; afterJoin = []; q.forEach(f => f());
     });
@@ -681,6 +750,38 @@ function stageEl() { return document.getElementById('videoPlayer'); }
 let nextCover = null;
 let currentContent = null; // { type, id, filename } of an addon title, for subtitles
 let lastLoaded = null;      // the room's video as last announced, to rebuild the room if the server restarts
+let roomSubtitle = null;
+let roomAudio = null;
+let subtitleRevision = 0;
+
+function setSubtitleMedia(data) {
+    if (data.mediaId !== lastLoaded?.mediaId) {
+        roomSubtitle = null;
+        roomAudio = null;
+        subtitleRevision = 0;
+        window.tracks?.setMedia(data.mediaId, data.src);
+    }
+    window.tracks?.setSettingsOwner(ownsRoomSettings(data));
+}
+
+function ownsRoomSettings(data = lastLoaded) {
+    return !!(party ? isHost() : data?.settingsOwner === socket?.id);
+}
+
+function shareRoomSubtitle({ mediaId, state }) {
+    if (!roomLive || !inRoom || !ownsRoomSettings()) return;
+    if (!socket?.connected || mediaId !== lastLoaded?.mediaId) { showToast('Reconnect to the room before changing subtitles.'); return; }
+    socket.timeout(10000).emit('set-subtitles', { mediaId, state }, (error, result) => {
+        if (error || !result?.ok) showToast(result?.message || 'The subtitle could not be shared. Try again.');
+    });
+}
+
+function shareRoomAudio({ mediaId, state }) {
+    if (!roomLive || !inRoom || !ownsRoomSettings() || mediaId !== lastLoaded?.mediaId) return;
+    socket.timeout(8000).emit('set-audio', { mediaId, state }, (error, result) => {
+        if (error || !result?.ok) showToast('Could not share the starting audio language.');
+    });
+}
 
 // Rejoin our room. After a server restart the room is gone; whoever comes back first brings it back as it was
 // (what's on, where it was, who hosts), so nobody has to start again.
@@ -691,7 +792,7 @@ function joinRoomNow() {
         kind: v.kind, src: v.src, videoId: v.videoId, title: v.title, content: v.content,
         currentTime: Math.max(0, roomPos()), isPlaying: !!anchor.isPlaying, host: !!(party ? isHost() : true)
     } : null;
-    socket.emit('join-room', { roomId, username: currentUser, restore });
+    socket.emit('join-room', { roomId, username: currentUser, restore, requireExisting: requireExistingRoom, resumeId: window.reddateBrowserSession.clientId() });
 }
 
 // Chat lines wait until the server confirms them: one typed during a reconnect is sent again once we're back.
@@ -808,6 +909,10 @@ const clockText = sec => { const t = Math.max(0, Math.floor(sec)); const h = Mat
 // Never further than the video is long (a room left "playing" for hours would say it's hours ahead).
 const behindBy = () => (vp ? Math.min(roomPos(), currentDuration > 0 ? currentDuration : Infinity) - vp.getCurrentTime() : 0);
 
+function renderShareCode() {
+    document.getElementById('shareRoomCode').textContent = roomCode;
+    document.getElementById('roomShare').hidden = !roomLive || !roomCode;
+}
 function renderRoomChip() {
     const codeEl = document.getElementById('roomCode');
     const base = prettyCode(roomId) ? `Room ${prettyCode(roomId)}` : '';
@@ -816,6 +921,7 @@ function renderRoomChip() {
     if (party && !isHost() && detached) bits.push('Not synced');
     codeEl.textContent = bits.filter(Boolean).join(' · ');
     codeEl.hidden = !codeEl.textContent;
+    renderShareCode();
 }
 function setDetached(on) {
     if (detached === on) return;
@@ -853,10 +959,12 @@ function maybeAskSync() {
     else if (confirm(`Sync with ${host}? ${host} is at ${at}.`)) resync();
 }
 function leaveToHome() {
+    window.reddateBrowserSession.clear();
     destroyPlayer();
     try { if (typeof theater !== 'undefined' && theater) setTheater(false); } catch (e) { /* fine */ }
     setNowPlaying('');
-    inRoom = false; roomLive = true; party = null; detached = false; roomId = null;
+    inRoom = false; roomLive = true; party = null; detached = false; roomId = null; roomCode = ''; requireExistingRoom = false;
+    renderShareCode();
     history.replaceState(null, '', `${location.pathname}${location.search}`);
     showScreen(document.documentElement.classList.contains('tv') ? 'home' : 'lobby');
 }
@@ -1154,6 +1262,7 @@ function createYouTubePlayer(videoId) {
     if (window.ReddateNative && window.ReddateNative.hasYouTube && window.ReddateNative.hasYouTube()) { createNativePlayer(videoId, { yt: true }); return; }
     if (!window.YT || !YT.Player) { setTimeout(() => createYouTubePlayer(videoId), 300); return; }
     destroyPlayer();
+    if (window.tracks) window.tracks.attachYouTube();
     currentSrc = videoId;
     const mount = document.createElement('div');
     stageEl().appendChild(mount);
@@ -1256,9 +1365,9 @@ function createNativePlayer(src, opts) {
             // The code is shown only in the invite panel, whose device list (below) is what makes the room real.
             room: prettyCode(roomId) || roomId || '',
             live: !!roomLive, // a real room on the server (a party); watching alone is private until then
-            invite: roomId ? `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(roomId)}` : '',
+            invite: roomId ? `${window.reddateWebOrigin || location.origin}/join/${encodeURIComponent(roomCode || roomId)}` : '',
             people: roomUsers.map(u => ({ id: u.id, name: u.name, you: (u.ids || [u.id]).includes(socket.id), buffering: !!u.buffering, host: !!(party && (u.ids || [u.id]).some(i => party.host === i || (Array.isArray(party.hosts) && party.hosts.includes(i)))), main: !!(party && (u.ids || [u.id]).includes(party.host)) })).sort((a, b) => b.you - a.you),
-            subs, subsLoading,
+            subs, subsLoading, roomSubtitle, roomAudio, isSettingsOwner: ownsRoomSettings(),
             subPref: window.tracks ? window.tracks.getPref() : '',
             episodes, current: currentContent ? currentContent.id : '', show: currentContent ? (currentContent.show || '') : '', showName, autoNext: autoNextOn(),
             hostOnly: !!party, isHost: isHost(), isMain: !!(party && socket && party.host === socket.id), hostName: party ? party.hostName : '', guestsCanPause: !!(party && party.guestsCanPause),
@@ -1419,6 +1528,16 @@ function createNativePlayer(src, opts) {
             case 'subpref':
                 if (window.tracks && typeof ev.lang === 'string') window.tracks.setPref(ev.lang);
                 break;
+            case 'subtitle':
+                if (ev.state && typeof ev.state === 'object') {
+                    window.tracks?.makeSubtitlePersonal();
+                    window.tracks?.applyShared(ev.state, true, true);
+                    shareRoomSubtitle({ mediaId: lastLoaded?.mediaId, state: ev.state });
+                }
+                break;
+            case 'audio':
+                if (ev.state) shareRoomAudio({ mediaId: lastLoaded?.mediaId, state: ev.state });
+                break;
             case 'chat':
                 if (window.reddateChat && typeof ev.text === 'string') window.reddateChat.send(ev.text);
                 break;
@@ -1461,7 +1580,7 @@ function createNativePlayer(src, opts) {
         pause: () => { if (!closed) N.command('{"cmd":"pause"}'); },
         destroy: () => { if (tracking) track('stop'); try { N.command('{"cmd":"stop"}'); } catch (_) {} if (window.ReddateTV) window.ReddateTV.onNative = null; window.reddateNativeInfo = null; window.__nativeOpen = false; }
     };
-    open(0, false);
+    open(Math.max(0, roomPos()), anchor.isPlaying);
 }
 
 function createDirectPlayer(src) {
@@ -1470,14 +1589,14 @@ function createDirectPlayer(src) {
     currentSrc = src;
     const v = document.createElement('video');
     let hls = null;
-    if (isHlsUrl(src) && !v.canPlayType('application/vnd.apple.mpegurl')) {
+    if (isHlsUrl(src) && !(v.canPlayType('application/vnd.apple.mpegurl') && v.audioTracks)) {
         // Chrome/Firefox need hls.js; Safari plays HLS natively via v.src.
         loadHlsJs().then(Hls => {
             if (currentSrc !== src || !Hls || !Hls.isSupported()) return;
             hls = new Hls();
+            if (window.tracks) window.tracks.attachHls(hls);
             hls.loadSource(src);
             hls.attachMedia(v);
-            if (window.tracks) window.tracks.attachHls(hls);
         }).catch(() => showToast('Could not load the HLS player'));
     } else {
         v.src = src;
@@ -1487,7 +1606,12 @@ function createDirectPlayer(src) {
     v.style.background = '#000'; // sized by #videoPlayer (fixed height on desktop, 16:9 on phones)
     stageEl().appendChild(v);
     showCover();
-    if (window.tracks) window.tracks.attach(v);
+    const audioGate = window.createPlaybackGate(v, {
+        onPlayback: playing => { if (!v.ended) onPlayerPlayPause(playing); },
+        onBuffering: on => { setBuffering(on); setPlayerStatus(on ? 'Buffering selected audio…' : ''); },
+        onPlayError: () => showToast('Tap the video to resume playback')
+    });
+    if (window.tracks) window.tracks.attach(v, src);
     // Addon sources can take a minute to resolve; say so instead of showing a dead black box.
     setPlayerStatus('⏳ Loading stream…');
     const slowTimer = setTimeout(() => {
@@ -1495,16 +1619,17 @@ function createDirectPlayer(src) {
     }, 15000);
     v.addEventListener('loadedmetadata', () => { currentDuration = isFinite(v.duration) ? v.duration : 0; });
     v.addEventListener('loadeddata', () => { clearTimeout(slowTimer); setPlayerStatus(''); hideCover(); isPlayerReady = true; updatePlayPauseButton(); applyPending(); });
-    v.addEventListener('play', () => onPlayerPlayPause(true));
-    v.addEventListener('pause', () => { if (!v.ended) onPlayerPlayPause(false); });
     v.addEventListener('waiting', () => setBuffering(true));
-    v.addEventListener('playing', () => setBuffering(false));
-    v.addEventListener('canplay', () => setBuffering(false));
+    v.addEventListener('playing', () => setBuffering(audioGate.buffering));
+    v.addEventListener('canplay', () => setBuffering(audioGate.buffering));
     // Only broadcast seeks the viewer made. Seeks applied from the room (remote
     // seek, sync, drift correction) must not be re-broadcast, or two players
     // echo the same seek back and forth forever and playback never advances.
     let programmaticSeekTo = null;
+    let syncAfter = 0;
+    v.addEventListener('seeking', () => { syncAfter = Date.now() + 2000; });
     v.addEventListener('seeked', () => {
+        syncAfter = Date.now() + 1200;
         if (programmaticSeekTo !== null && Math.abs(v.currentTime - programmaticSeekTo) < 0.5) {
             programmaticSeekTo = null;
             return;
@@ -1520,13 +1645,13 @@ function createDirectPlayer(src) {
     });
     vp = {
         kind: 'direct',
-        isAdvancing: () => !v.paused && !v.ended && v.readyState >= 3,
+        isAdvancing: () => !audioGate.buffering && !v.paused && !v.ended && !v.seeking && v.readyState >= 3 && Date.now() >= syncAfter,
         setRate: r => { if (v.playbackRate !== r) v.playbackRate = r; },
         getCurrentTime: () => v.currentTime || 0,
         seekTo: (t) => { programmaticSeekTo = t; v.currentTime = t; },
-        play: () => { const p = v.play(); if (p && p.catch) p.catch(() => showToast('Tap the video once to start playback ▶️')); },
-        pause: () => v.pause(),
-        destroy: () => { clearTimeout(slowTimer); if (hls) hls.destroy(); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); }
+        play: () => audioGate.play(),
+        pause: () => audioGate.pause(),
+        destroy: () => { clearTimeout(slowTimer); audioGate.destroy(); if (hls) hls.destroy(); v.pause(); v.removeAttribute('src'); v.load(); v.remove(); }
     };
 }
 
@@ -1542,6 +1667,28 @@ function ensurePlayer(state) {
 
 
 function wireVideoEvents() {
+    window.tracks?.configureRoom(shareRoomSubtitle, shareRoomAudio);
+    socket.on('audio-updated', payload => {
+        if (payload.mediaId !== lastLoaded?.mediaId || (roomAudio && payload.revision <= roomAudio.revision)) return;
+        roomAudio = payload;
+        window.tracks?.applyRoomAudio(payload.state);
+        if (window.reddateNativeInfo) window.reddateNativeInfo();
+    });
+    socket.on('party', () => { window.tracks?.setSettingsOwner(ownsRoomSettings()); if (window.reddateNativeInfo) window.reddateNativeInfo(); });
+    socket.on('room-settings-owner', data => {
+        if (data.mediaId !== lastLoaded?.mediaId) return;
+        lastLoaded.settingsOwner = data.settingsOwner;
+        window.tracks?.setSettingsOwner(ownsRoomSettings());
+        if (window.reddateNativeInfo) window.reddateNativeInfo();
+    });
+    socket.on('joined', () => window.tracks?.reportAudio(true));
+    socket.on('subtitles-updated', payload => {
+        if (payload.mediaId !== lastLoaded?.mediaId || payload.revision <= subtitleRevision) return;
+        subtitleRevision = payload.revision;
+        roomSubtitle = { ...payload, own: payload.sender === socket.id };
+        window.tracks?.applyShared(payload.state, roomSubtitle.own);
+        if (window.reddateNativeInfo) window.reddateNativeInfo();
+    });
     socket.on('video-loaded', data => {
         if (party && !isHost() && detached) {
             // The host started something else while this guest was off on their own: ask first.
@@ -1556,6 +1703,7 @@ function wireVideoEvents() {
     });
     handleLoadedRef = data => handleLoaded(data);
     function handleLoaded(data) {
+        setSubtitleMedia(data);
         lastLoaded = data;
         seekFails = 0; seekAim = 0; pendingSeekAt = 0; // a new video: learn afresh whether it can seek
         nextCover = { art: data.content && data.content.art, title: data.title };
@@ -1580,6 +1728,7 @@ function wireVideoEvents() {
         applyAnchor();
     });
     socket.on('video-sync', state => {
+        setSubtitleMedia(state);
         lastLoaded = state;
         nextCover = { art: state.content && state.content.art, title: state.title };
         currentContent = state.kind === 'direct' ? state.content : null;
@@ -1821,6 +1970,11 @@ function wireControls() {
         typingTimer = setTimeout(() => socket.emit('typing-stop'), 1000);
     });
 
+    document.getElementById('copyRoomCodeBtn').addEventListener('click', async () => {
+        if (!roomCode || !roomLive) return;
+        try { await navigator.clipboard.writeText(roomCode); showToast('Room code copied'); }
+        catch { prompt('Copy this room code:', roomCode); }
+    });
     document.getElementById('shareBtn').addEventListener('click', async () => {
         const link = location.href;
         try {
@@ -1865,14 +2019,50 @@ function wireControls() {
 // ---------------- Start ----------------
 // After every script on the page has loaded (the Lounge and TV scripts come after this one).
 // Connect now; the screen depends on whether this is an invite link.
+function restoreBrowserRoom() {
+    if (FRAME) return false;
+    const saved = window.reddateBrowserSession.resumeForRoom(existing.roomId || leanCode);
+    if (!saved) return false;
+    if (window.reddateAccount && !window.reddateAccount.isReady()) {
+        document.addEventListener('reddate:account-ready', () => {
+            sayHello();
+            restoreBrowserRoom();
+        }, { once: true });
+        showScreen('room');
+        setPlayerStatus('Restoring your room…');
+        return true;
+    }
+    usernameInput.value = savedName() || saved.name;
+    const joined = waitForJoin();
+    enterRoom(usernameInput.value, saved.roomId, null, { requireExisting: true });
+    joined.then(result => {
+        if (!result?.ok) {
+            inRoom = false;
+            showScreen('lobby');
+            showLobbyError(result?.message || 'Could not restore the room. Try joining again.');
+        }
+    });
+    return true;
+}
+
 function boot() {
     startApp();
+    const create = new URLSearchParams(location.search);
+    if (location.pathname === '/classic' && create.get('create') === '1') {
+        usernameInput.value = create.get('name') || savedName() || 'Guest';
+        history.replaceState(null, '', '/classic');
+        enterFromLobby(false);
+        return;
+    }
+    if (restoreBrowserRoom()) return;
     const tv = document.documentElement.classList.contains('tv');
     if (existing.roomId || !tv) {
         if (existing.roomId) {
             lobbyBtn.textContent = 'Join room';
+            document.getElementById('lobbyTitle').textContent = 'Join your friends.';
             document.getElementById('lobbyTagline').textContent = 'You’ve been invited to watch together. Pick a name and jump in.';
             document.getElementById('lobbyCode').hidden = true;
+            document.getElementById('createHint').hidden = true;
         }
         usernameInput.value = savedName();
         showScreen('lobby');

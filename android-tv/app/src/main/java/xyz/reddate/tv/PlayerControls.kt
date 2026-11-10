@@ -1208,22 +1208,38 @@ class PlayerControls(
 
     /** Called when the player's tracks change, so an open panel shows the new state. */
     private var audioAuto = false
+    private var audioPersonal = false
+    private var reportedAudio = ""
+    private var reportedStartingSubtitle = false
     /** Start on the viewer's own language (English, or the TV's language), not on whatever track the file lists first. */
     fun autoPickAudio() {
-        if (audioAuto) return
         val p = playerOf() ?: return
         val groups = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
         val entries = ArrayList<Triple<androidx.media3.common.Tracks.Group, Int, Format>>()
         for (g in groups) for (i in 0 until g.length) if (g.isTrackSupported(i)) entries += Triple(g, i, g.getTrackFormat(i))
         if (entries.isEmpty()) return
+        val shared = info.optJSONObject("roomAudio")?.optJSONObject("state")
+        if (shared != null && !audioPersonal) {
+            val lang = shared.optString("language")
+            var index = if (lang.isEmpty()) -1 else entries.indexOfFirst { (_, _, f) -> sameLang(f.language ?: "", lang) }
+            if (index < 0 && lang.isEmpty()) index = shared.optInt("index", -1)
+            if (index in entries.indices) {
+                audioAuto = true
+                val (g, i, _) = entries[index]
+                if (!g.isTrackSelected(i)) p.trackSelectionParameters = p.trackSelectionParameters.buildUpon().setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
+                return
+            }
+        }
+        if (audioAuto) return
         audioAuto = true
         if (entries.size < 2) return
-        val mine = listOf(Locale.getDefault().getDisplayLanguage(Locale.ENGLISH).lowercase(), "english").distinct()
-        var idx = entries.indexOfFirst { (_, _, f) ->
+        val remembered = activity.getSharedPreferences("reddate-player", 0).getString("audio-language", "") ?: ""
+        val mine = listOf(remembered, Locale.getDefault().getDisplayLanguage(Locale.ENGLISH).lowercase(), "english").filter { it.isNotEmpty() }.distinct()
+        var idx = mine.firstNotNullOfOrNull { wanted -> entries.indexOfFirst { (_, _, f) ->
             var name = xyz.reddate.tv.Langs.nameOf(f.language)
             if (name.isEmpty() && !f.label.isNullOrEmpty()) name = xyz.reddate.tv.Langs.scan(f.label!!).firstOrNull() ?: ""
-            name in mine
-        }
+            name == wanted
+        }.takeIf { it >= 0 } } ?: -1
         if (idx < 0) {
             // Tracks without language tags: the file name usually lists the languages in track order.
             val guess = guessedAudioLangs()
@@ -1235,8 +1251,43 @@ class PlayerControls(
         p.trackSelectionParameters = p.trackSelectionParameters.buildUpon().setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
     }
 
+    private fun reportStartingAudio() {
+        if (!info.optBoolean("isSettingsOwner")) return
+        val p = playerOf() ?: return
+        val entries = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+            .flatMap { g -> (0 until g.length).filter { g.isTrackSupported(it) }.map { i -> g to i } }
+        val index = entries.indexOfFirst { (g, i) -> g.isTrackSelected(i) }
+        if (index < 0) return
+        val (g, i) = entries[index]
+        val f = g.getTrackFormat(i)
+        val language = f.language ?: ""
+        val label = f.label ?: ""
+        val signature = "$language|$label|$index"
+        if (signature == reportedAudio) return
+        reportedAudio = signature
+        activity.emitAudioChoice(language, label, index)
+    }
+
+    private fun reportStartingSubtitle() {
+        if (!info.optBoolean("isSettingsOwner") || reportedStartingSubtitle) return
+        val p = playerOf() ?: return
+        if (p.currentTracks.groups.isEmpty()) return
+        reportedStartingSubtitle = true
+        if (activity.subtitlePersonal) { activity.emitCurrentSubtitle(); return }
+        if (info.optJSONObject("roomSubtitle") != null) return
+        val pick = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+            .flatMap { g -> (0 until g.length).map { i -> g to i } }.firstOrNull { (g, i) -> g.isTrackSelected(i) }
+        if (pick != null) {
+            val f = pick.first.getTrackFormat(pick.second)
+            activity.shareEmbeddedSubtitle(f.language ?: "", f.label ?: "Subtitles")
+        } else activity.shareSubtitleOff()
+    }
+
     fun onTracksChanged() {
         autoPickAudio()
+        reportStartingAudio()
+        reportStartingSubtitle()
+        selectSharedEmbedded()
         if (!restoreDone && playerOf()?.currentTracks?.groups?.any { it.type == C.TRACK_TYPE_TEXT } == true) { if (!restoreSubs()) pickInVideoDefault() }
         if (panelKind == "subs" || panelKind == "audio") {
             val had = panel.findFocus()
@@ -1315,6 +1366,9 @@ class PlayerControls(
                 val ch = when (f.channelCount) { 1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "" }
                 val sub = listOf(codecLabel(f), ch, if (guessed) "language from the file name" else "").filter { it.isNotEmpty() }.joinToString(" · ")
                 add(row(title, sub, sel) {
+                    audioAuto = true
+                    audioPersonal = true
+                    activity.getSharedPreferences("reddate-player", 0).edit().putString("audio-language", langName).apply()
                     p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
                         .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
                 }, sel)
@@ -1456,6 +1510,7 @@ class PlayerControls(
             p.trackSelectionParameters = p.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
             activity.clearExternalSubtitle(); externalUrl = ""
             activity.emitSubPref("off")
+            activity.shareSubtitleOff()
             subPref = "off"
             rememberSubs("off", "")
             fillSubList()
@@ -1475,6 +1530,7 @@ class PlayerControls(
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                     .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
                 f.language?.let { activity.emitSubPref(it); subPref = it }
+                activity.shareEmbeddedSubtitle(f.language ?: "", trackLabel(f, i, false))
                 rememberSubs("in", f.language ?: "", trackLabel(f, i, false))
                 fillSubList()
             }, sel)
@@ -1529,9 +1585,9 @@ class PlayerControls(
         adj(2, "Colour", colorNames[a.subColor.coerceIn(0, 3)])
         adj(3, "Background", bgNames[a.subBg.coerceIn(0, 3)])
         adj(4, "Font", fontNames[a.subFont.coerceIn(0, 3)])
-        adj(5, "Sync subtitles", fmtDelay(a.subDelayMs))
+        adj(5, "Sync room subtitles", fmtDelay(a.subDelayMs))
         add(note(if (a.subs.cues.isEmpty()) "Delay works on online subtitles. Pick one from the list first." else "Left and right change the value. Press OK on Sync to reset it."))
-        add(row("Reset look") { a.subSize = 1; a.subPos = 1; a.subColor = 0; a.subBg = 1; a.subFont = 0; a.subDelayMs = 0; renderPanel(); focusPanel() })
+        add(row("Reset look") { a.subSize = 1; a.subPos = 1; a.subColor = 0; a.subBg = 1; a.subFont = 0; a.subDelayMs = 0; a.shareSubtitleTiming(); renderPanel(); focusPanel() })
         add(row("Done") { openPanel("subs") })
     }
 
@@ -1640,6 +1696,7 @@ class PlayerControls(
 
     // ---------- online subtitles (read by the app, so the picture never restarts) ----------
     private fun addOnlineSub(s: JSONObject, user: Boolean = true, after: (() -> Unit)? = null) {
+        if (user) activity.subtitlePersonal = true
         val u = s.optString("url")
         if (!u.startsWith("https://") && !u.startsWith("http://")) return
         val lang = s.optString("lang")
@@ -1648,7 +1705,10 @@ class PlayerControls(
         panelList.removeAllViews()
         add(note("Loading subtitles…"))
         activity.useExternalSubtitle(u) { ok ->
-            if (ok) { externalUrl = u; toastBar("Subtitles on"); if (user) rememberSubs("online", lang, s.optString("name"), u) } else toastBar("Couldn't load those. Try another option.")
+            if (ok) {
+                externalUrl = u; toastBar("Subtitles on")
+                if (user) { rememberSubs("online", lang, s.optString("name"), u); activity.shareExternalSubtitle(lang, s.optString("label", lang)) }
+            } else toastBar("Couldn't load those. Try another option.")
             if (panelKind == "subs") { renderPanel(); focusPanel() }
             if (ok) after?.invoke()
         }
@@ -1673,12 +1733,14 @@ class PlayerControls(
     }
 
     private fun rememberDelay() {
+        activity.shareSubtitleTiming()
         val ik = itemKey(); if (ik.isEmpty() || externalUrl.isEmpty()) return
         subMem.edit().putString("i:${pid()}:$ik", JSONObject().put("url", externalUrl).put("delay", activity.subDelayMs).toString()).apply()
     }
 
     /** Put back what this viewer chose for this show last time. True when there's nothing more to do. */
     private fun restoreSubs(): Boolean {
+        if (info.optBoolean("live")) return true
         if (restoreDone) return true
         val sk = showKey(); if (sk.isEmpty()) return false
         val mem = subMem.getString("s:${pid()}:$sk", null)?.let { try { JSONObject(it) } catch (_: Exception) { null } } ?: return false
@@ -1723,6 +1785,7 @@ class PlayerControls(
 
     /** First time on this show or movie: if the video has its own subtitles, turn them on (the viewer can change it). */
     private fun pickInVideoDefault(): Boolean {
+        if (info.optBoolean("live")) return true
         if (restoreDone || externalUrl.isNotEmpty()) return restoreDone
         val sk = showKey()
         if (sk.isEmpty() || subMem.contains("s:${pid()}:$sk")) return false
@@ -2226,12 +2289,42 @@ class PlayerControls(
     }
 
     // ---------- from the page ----------
+    private var sharedSubtitleRevision = ""
+    private fun selectSharedEmbedded() {
+        if (activity.subtitlePersonal && !info.optBoolean("isSettingsOwner")) return
+        val embedded = info.optJSONObject("roomSubtitle")?.optJSONObject("state")?.optString("embeddedLang").orEmpty()
+        if (embedded.isEmpty()) return
+        val p = playerOf() ?: return
+        val match = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+            .flatMap { g -> (0 until g.length).map { i -> g to i } }
+            .firstOrNull { (g, i) -> sameLang(g.getTrackFormat(i).language ?: "", embedded) } ?: return
+        if (match.first.isTrackSelected(match.second) && !p.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .setOverrideForType(TrackSelectionOverride(match.first.mediaTrackGroup, match.second)).build()
+    }
     fun setInfo(o: JSONObject) {
         val hadSubs = (info.optJSONArray("subs")?.length() ?: 0) > 0
+        var subtitleChanged = false
         info = o
-        if (o.has("subPref")) subPref = o.optString("subPref")
+        o.optJSONObject("roomSubtitle")?.let { shared ->
+            val revision = "${shared.optString("mediaId")}:${shared.optLong("revision") }"
+            if (revision != sharedSubtitleRevision && (!activity.subtitlePersonal || o.optBoolean("isSettingsOwner"))) {
+                subtitleChanged = true
+                sharedSubtitleRevision = revision
+                shared.optJSONObject("state")?.let { state ->
+                    activity.applySharedSubtitle(state, shared.optBoolean("own"))
+                    externalUrl = if (state.isNull("vtt")) "" else state.optString("key")
+                    subPref = state.optString("lang", "off")
+                    selectSharedEmbedded()
+                }
+            }
+        }
+        if (o.has("subPref") && (!o.has("roomSubtitle") || activity.subtitlePersonal)) subPref = o.optString("subPref")
+        autoPickAudio()
+        reportStartingAudio()
+        reportStartingSubtitle()
         if (barVisible) updateMeta() else updateBehindPill()
-        if (panelVisible && (panelKind == "people" || panelKind == "invite" || (panelKind == "subs" && !hadSubs))) {
+        if (panelVisible && (panelKind == "people" || panelKind == "invite" || (panelKind == "subs" && (!hadSubs || subtitleChanged)))) {
             renderPanel(); focusPanel()
         }
         if (!hadSubs && (o.optJSONArray("subs")?.length() ?: 0) > 0) autoPickPreferred()
@@ -2246,7 +2339,11 @@ class PlayerControls(
         externalUrl = ""
         subsLang = ""
         restoreDone = false
+        sharedSubtitleRevision = ""
         audioAuto = false
+        audioPersonal = false
+        reportedAudio = ""
+        reportedStartingSubtitle = false
         autoSyncing = false
         autoSyncLine = ""
         panel.visibility = View.GONE
