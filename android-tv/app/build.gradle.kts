@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.net.URI
 
 plugins {
     id("com.android.application")
@@ -12,10 +13,15 @@ val keystoreProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
-// Where the app loads Reddate from. Release builds use the live site; debug builds
+// Where the app loads Reddate from. Release builds use the live site or -PreleaseUrl; debug builds
 // default to the Android emulator's "host computer" address, and can be pointed at a
 // computer on your Wi-Fi with:  ./gradlew installDebug -PstartUrl=http://192.168.1.20:3090/?tv=1
-val liveUrl = "https://tv.reddate.xyz/?tv=1"
+val liveUrl = (project.findProperty("releaseUrl") as String?) ?: "https://tv.reddate.xyz/?tv=1"
+val liveUri = URI(liveUrl)
+require(liveUri.scheme == "https" && !liveUri.host.isNullOrBlank() && liveUri.userInfo == null &&
+    liveUrl.none { it == '"' || it == '\\' || it.isISOControl() }) {
+    "releaseUrl must be an HTTPS URL without credentials or control characters"
+}
 val debugUrl = (project.findProperty("startUrl") as String?) ?: "http://10.0.2.2:3090/?tv=1"
 
 android {

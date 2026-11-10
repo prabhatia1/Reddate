@@ -42,7 +42,8 @@ object Updater {
             val body = c.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
             c.disconnect()
             val o = JSONObject(body)
-            val url = o.optString("url").let { if (it.startsWith("http")) it else base() + it }
+            // Use the site's stable download route; it chooses the current APK and follows release redirects.
+            val url = base() + "/get"
             Info(o.optInt("versionCode"), o.optString("versionName"), url, o.optLong("size"), o.optString("sha256"), o.optString("notes"))
         } catch (_: Exception) { null }
     }
