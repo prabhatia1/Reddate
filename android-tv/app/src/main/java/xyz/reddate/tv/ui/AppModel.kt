@@ -595,10 +595,10 @@ class AppModel(private val scope: CoroutineScope) {
     }
 
     /** "Watch together" with nothing picked yet: start an empty room and show how to join. */
-    fun together(code: String = "") = scope.launch {
+    fun together() = scope.launch {
         try {
             val seq = ++inviteSeq
-            val result = Engine.call("together", JSONObject().put("code", code), timeoutMs = 25_000) as? JSONObject
+            val result = Engine.call("together", timeoutMs = 25_000) as? JSONObject
             if (result?.optBoolean("ok") != true) { say(result?.optString("message") ?: "Couldn’t start a room"); return@launch }
             awaitRoomThenInvite(seq = seq)
         } catch (e: Exception) { say(e.message ?: "Couldn’t start a room") }

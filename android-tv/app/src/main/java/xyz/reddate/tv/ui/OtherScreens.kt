@@ -220,10 +220,10 @@ fun SearchScreen(model: AppModel) {
                     lazyItems(groups, key = { it.first }) { (title, metas) ->
                         Column {
                             SectionTitle("$title  ·  ${metas.size}")
-                            HorizontalPin { androidx.compose.foundation.lazy.LazyRow(state = rowStates.getOrPut(title) { androidx.compose.foundation.lazy.LazyListState() }, horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(end = 40.dp)) {
+                            HorizontalPin { androidx.compose.foundation.lazy.LazyRow(state = rowStates.getOrPut(title) { androidx.compose.foundation.lazy.LazyListState() }, horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(start = 8.dp, end = 40.dp, top = 12.dp, bottom = 8.dp)) {
                                 lazyItems(metas, key = { it.id }) { m ->
                                     val req = requesters.getOrPut(m.id) { FocusRequester() }
-                                    PosterCard(m, onClick = { model.searchLastId = m.id; kb?.hide(); model.go(Screen.Title(m)) }, modifier = Modifier.focusRequester(req))
+                                    PosterCard(m, onClick = { model.searchLastId = m.id; kb?.hide(); model.go(Screen.Title(m)) }, modifier = Modifier.focusRequester(req), showTitle = true)
                                 }
                             } }
                         }
@@ -417,23 +417,18 @@ fun JoinCodeDialog(model: AppModel) {
 @Composable
 fun TogetherDialog(model: AppModel) {
     val first = remember { FocusRequester() }
-    var roomCode by remember { mutableStateOf("") }
-    var codeError by remember { mutableStateOf("") }
     Dialog(onDismissRequest = { model.dialog = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(480.dp).clip(RoundedCornerShape(16.dp)).background(C.paper2).padding(28.dp)) {
+        Column(Modifier.width(520.dp).clip(RoundedCornerShape(16.dp)).background(C.paper2).padding(28.dp)) {
             Text("Watch together", style = MaterialTheme.typography.headlineSmall, color = C.ink)
             Text("Watch in sync with friends, on any screen.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
-            Spacer(Modifier.height(16.dp))
-            TvTextField(roomCode, { roomCode = it.uppercase().take(5); codeError = "" }, "Your code (optional)", {}, Modifier.fillMaxWidth())
-            Text("Leave blank to generate a 5-character code.", color = C.muted, style = MaterialTheme.typography.bodySmall)
-            if (codeError.isNotEmpty()) Text(codeError, color = C.accent, style = MaterialTheme.typography.bodyMedium)
+            Text("Starting a party generates a unique 5-character code to share.", color = C.muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 12.dp))
             Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 PillButton("Start a party", {
-                    if (roomCode.isNotEmpty() && !Regex("^[A-Z0-9]{5}$").matches(roomCode)) codeError = "Use exactly 5 letters or numbers."
-                    else { model.dialog = null; model.together(roomCode) }
-                }, primary = true, icon = Icons.Default.Share, modifier = Modifier.focusRequester(first))
-                PillButton("Join with a code", { model.dialog = Dlg.JoinCode })
+                    model.dialog = null
+                    model.together()
+                }, primary = true, icon = Icons.Default.Share, modifier = Modifier.fillMaxWidth().focusRequester(first))
+                PillButton("Join with a code or invite link", { model.dialog = Dlg.JoinCode }, modifier = Modifier.fillMaxWidth())
             }
         }
     }
