@@ -11,7 +11,7 @@
  *
  * initAddons() is called from app.js once the socket exists.
  */
-window.initAddons = function (socket, { roomId, encrypt, decrypt, toast }) {
+window.initAddons = function (socket, { roomId, encrypt, decrypt, toast, loadVideo }) {
     // Built-ins: a catalog (browsing works before anything is added) and a
     // subtitle source. Reddate ships no stream source — rooms add their own.
     const CINEMETA_URL = 'https://v3-cinemeta.strem.io/manifest.json';
@@ -1028,14 +1028,15 @@ window.initAddons = function (socket, { roomId, encrypt, decrypt, toast }) {
         }
     }
 
-    function playForRoom(stream, label, content) {
+    async function playForRoom(stream, label, content) {
         cancelProbes(); // free the bandwidth for real playback
         // `content` says what's playing so each viewer can fetch subtitles for it.
         const filename = (stream.behaviorHints && stream.behaviorHints.filename) || stream.title || stream.description || '';
-        socket.emit('load-video', {
+        const loaded = await loadVideo({
             kind: 'direct', src: stream.url, title: label,
             content: { type: content.type, id: content.id, filename: String(filename).slice(0, 200) }
         });
+        if (!loaded) return;
         modal.classList.remove('show');
         toast(`▶️ Loading “${label}” for everyone`);
     }

@@ -258,6 +258,11 @@
         const timer = setInterval(tick, 150);
         return {
             load, select, prepare,
+            setMuted(value) {
+                muted = originalMuted = !!value;
+                video.muted = active ? true : muted;
+                syncVolume();
+            },
             get tracks() { return session?.tracks || []; },
             get selected() { return selected; },
             get active() { return active; },
